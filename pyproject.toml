@@ -38,12 +38,12 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = [
-    "pytest==8.4.2",
-    "pytest-asyncio==0.26.0",
-    "ruff==0.15.14",
-    "mypy==1.20.2",
+    "pytest==9.1.1",
+    "pytest-asyncio==1.4.0",
+    "ruff==0.16.9",
+    "mypy==2.3.1",
     "types-pyyaml>=6,<7",
-    "datamodel-code-generator==0.57.0",
+    "datamodel-code-generator==0.83.0",
 ]
 
 [project.scripts]
