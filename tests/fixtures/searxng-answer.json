@@ -1,0 +1,324 @@
+{
+ "query": "llama.cpp rpc server",
+ "results": [
+  {
+   "template": "default.html",
+   "title": "llama.cpp/tools/rpc/README.md at master · ggml-org/llama ... - GitHub",
+   "content": "Finally, when running llama-cli ... default, llama.cpp distributes model weights and the KV cache across all available devices -- both local and remote -- in proportion to each device's available memory....",
+   "img_src": "",
+   "iframe_src": "",
+   "audio_src": "",
+   "thumbnail": "https://imgs.search.brave.com/dnABgxXEtSf7EqzipjJ16rEaEXDvGL71ehK6oqcFPQU/rs:fit:200:200:1:0/g:ce/aHR0cHM6Ly9yZXBv/c2l0b3J5LWltYWdl/cy5naXRodWJ1c2Vy/Y29udGVudC5jb20v/NjEyMzU0Nzg0Lzhi/OWViMGVjLTY1MTct/NDRhOS04YTNhLWZj/Y2RkYzY3OGU1Nw",
+   "publishedDate": null,
+   "pubdate": null,
+   "length": null,
+   "views": "",
+   "author": "",
+   "metadata": "",
+   "priority": "",
+   "engines": [
+    "google cse",
+    "brave"
+   ],
+   "open_group": false,
+   "close_group": false,
+   "positions": [
+    1,
+    1
+   ],
+   "score": 4.0,
+   "category": "general",
+   "url": "https://github.com/ggml-org/llama.cpp/blob/master/tools/rpc/README.md",
+   "engine": "brave",
+   "parsed_url": [
+    "https",
+    "github.com",
+    "/ggml-org/llama.cpp/blob/master/tools/rpc/README.md",
+    "",
+    "",
+    ""
+   ]
+  },
+  {
+   "template": "default.html",
+   "title": "r/LocalLLaMA on Reddit: What is the current state of llama.cpp ...",
+   "content": "The biggest issue IMO is that you need to run a server for each GPU instead of 1 server for each node, so if you have 3 GPUs, 3 remote servers, in my case 14 remote servers. But it works. I can run llama405B 6x faster when fully offloaded than offloaded on system ram. However, I can run deepseek faster locally than using RPC even if I have majority of it on system ram.",
+   "img_src": "",
+   "iframe_src": "",
+   "audio_src": "",
+   "thumbnail": "https://imgs.search.brave.com/lpe9y8R0t0MLTCsXmxFKhemdED8B1whsaqFSzHW6osM/rs:fit:200:200:1:0/g:ce/aHR0cHM6Ly9zaGFy/ZS5yZWRkLml0L3By/ZXZpZXcvcG9zdC8x/bDh2eml5",
+   "publishedDate": "2025-06-11T15:42:39",
+   "pubdate": "2025-06-11 15:42:39",
+   "length": null,
+   "views": "",
+   "author": "",
+   "metadata": "",
+   "priority": "",
+   "engines": [
+    "google cse",
+    "brave"
+   ],
+   "open_group": false,
+   "close_group": false,
+   "positions": [
+    2,
+    2
+   ],
+   "score": 2.0,
+   "category": "general",
+   "url": "https://www.reddit.com/r/LocalLLaMA/comments/1l8vziy/what_is_the_current_state_of_llamacpp_rpcserver/",
+   "engine": "brave",
+   "parsed_url": [
+    "https",
+    "www.reddit.com",
+    "/r/LocalLLaMA/comments/1l8vziy/what_is_the_current_state_of_llamacpp_rpcserver/",
+    "",
+    "",
+    ""
+   ]
+  },
+  {
+   "template": "default.html",
+   "title": "llama.cpp RPC backend: distributed inference across multiple machines ...",
+   "content": "./build/bin/llama-server \\ -m ~/models/llama-3.3-70b-instruct.Q4_K_M.gguf \\ --rpc 192.168.1.10:50052,192.168.1.11:50052 \\ --host 127.0.0.1 --port 8080 \\ -ngl 99 · llama.cpp now sees a device list that includes the primary's own backend (Metal or CUDA), any local GPUs, and one RPC device per worker.",
+   "img_src": "",
+   "iframe_src": "",
+   "audio_src": "",
+   "thumbnail": "https://imgs.search.brave.com/IqCRH8QAPBlW_Qmh6VjhipppLnZic3N67iRA5F_GVng/rs:fit:200:200:1:0/g:ce/aHR0cHM6Ly9zaGFy/ZWRsbG0ub3JnL29n/LWltYWdlLnBuZw",
+   "publishedDate": "2026-07-18T00:00:00",
+   "pubdate": "2026-07-18 00:00:00",
+   "length": null,
+   "views": "",
+   "author": "",
+   "metadata": "",
+   "priority": "",
+   "engines": [
+    "google cse",
+    "brave"
+   ],
+   "open_group": false,
+   "close_group": false,
+   "positions": [
+    3,
+    3
+   ],
+   "score": 1.3333333333333333,
+   "category": "general",
+   "url": "https://sharedllm.org/blog/llama-cpp-rpc-distributed-inference.html",
+   "engine": "brave",
+   "parsed_url": [
+    "https",
+    "sharedllm.org",
+    "/blog/llama-cpp-rpc-distributed-inference.html",
+    "",
+    "",
+    ""
+   ]
+  },
+  {
+   "template": "default.html",
+   "title": "Distributed llama.cpp on reComputer Jetson (RPC Mode) | Seeed Studio ...",
+   "content": "Step 1. Connect to the remote machine and start the RPC server: ssh [email protected] cd ~/llama.cpp CUDA_VISIBLE_DEVICES=0 ./build/bin/rpc-server --host 192.168.100.1",
+   "img_src": "",
+   "iframe_src": "",
+   "audio_src": "",
+   "thumbnail": "https://imgs.search.brave.com/-GZoyUQwv86Oifhi6EG649hkZDK5_jH-y8cTGbTVLv0/rs:fit:200:200:1:0/g:ce/aHR0cHM6Ly9maWxl/cy5zZWVlZHN0dWRp/by5jb20vd2lraS9y/ZWNvbXB1dGVyX3Jv/Ym90aWNfajUwMS9o/YXJkd2FyZV9vdmVy/dmlldy5wbmcuanBn",
+   "publishedDate": "2026-01-09T00:00:00",
+   "pubdate": "2026-01-09 00:00:00",
+   "length": null,
+   "views": "",
+   "author": "",
+   "metadata": "",
+   "priority": "",
+   "engines": [
+    "google cse",
+    "brave"
+   ],
+   "open_group": false,
+   "close_group": false,
+   "positions": [
+    4,
+    4
+   ],
+   "score": 1.0,
+   "category": "general",
+   "url": "https://wiki.seeedstudio.com/ai_robotics_distributed_llama_cpp_rpc_jetson/",
+   "engine": "brave",
+   "parsed_url": [
+    "https",
+    "wiki.seeedstudio.com",
+    "/ai_robotics_distributed_llama_cpp_rpc_jetson/",
+    "",
+    "",
+    ""
+   ]
+  },
+  {
+   "template": "default.html",
+   "title": "Running models with llama cpp mono / cluster mode | by Mahernaija ...",
+   "content": "cd llama.cpp/examples/rpc/ CUDA_VISIBLE_DEVICES=0 ./rpc-server -p 50052 -H 0.0.0.0 · ./build/bin/llama-cli -m downloads/Meta-Llama-3.1–8B-Instruct-Q8_0.gguf -p “You are a helpful assistant” — repeat-penalty 1.0 -n 64 — rpc 127.0.0.1:50052 -ngl 99 ·",
+   "img_src": "",
+   "iframe_src": "",
+   "audio_src": "",
+   "thumbnail": "https://imgs.search.brave.com/B_gWCQjo3TnsKDkxR-1WPGDMJQNURg9zaHMcWRQDsds/rs:fit:200:200:1:0/g:ce/aHR0cHM6Ly9taXJv/Lm1lZGl1bS5jb20v",
+   "publishedDate": "2024-08-15T19:04:29",
+   "pubdate": "2024-08-15 19:04:29",
+   "length": null,
+   "views": "",
+   "author": "",
+   "metadata": "",
+   "priority": "",
+   "engines": [
+    "google cse",
+    "brave"
+   ],
+   "open_group": false,
+   "close_group": false,
+   "positions": [
+    8,
+    5
+   ],
+   "score": 0.65,
+   "category": "general",
+   "url": "https://medium.com/@mahernaija/running-models-with-llama-cpp-06a704c1b22d",
+   "engine": "brave",
+   "parsed_url": [
+    "https",
+    "medium.com",
+    "/@mahernaija/running-models-with-llama-cpp-06a704c1b22d",
+    "",
+    "",
+    ""
+   ]
+  },
+  {
+   "template": "default.html",
+   "title": "Llama's Paradox - Delving deep into Llama.cpp and exploiting ...",
+   "content": "The story begins at Llama.cpp's ... rpc-server in llama.cpp enables the execution of the GGML backend on a remote host, allowing for distributed large language model (LLM) inference....",
+   "img_src": "",
+   "iframe_src": "",
+   "audio_src": "",
+   "thumbnail": "https://imgs.search.brave.com/hRItP93QxDOPDE0QC4zwhwCC2X9EOQVcXuH_L9KIak8/rs:fit:200:200:1:0/g:ce/aHR0cHM6Ly9yZXRy/MC5ibG9nL2Jsb2cv/bGxhbWEtcnBjLXJj/ZS9vcGVuZ3JhcGgt/aW1hZ2U_Y2VlNzhk/ZmMxYjA1YTlmNw",
+   "publishedDate": "2025-02-06T00:00:00",
+   "pubdate": "2025-02-06 00:00:00",
+   "length": null,
+   "views": "",
+   "author": "",
+   "metadata": "",
+   "priority": "",
+   "engines": [
+    "google cse",
+    "brave"
+   ],
+   "open_group": false,
+   "close_group": false,
+   "positions": [
+    5,
+    9
+   ],
+   "score": 0.6222222222222222,
+   "category": "general",
+   "url": "https://retr0.blog/blog/llama-rpc-rce",
+   "engine": "brave",
+   "parsed_url": [
+    "https",
+    "retr0.blog",
+    "/blog/llama-rpc-rce",
+    "",
+    "",
+    ""
+   ]
+  },
+  {
+   "template": "default.html",
+   "title": "Llama.cpp rpc on dgx spark - DGX Spark / GB10 - NVIDIA Developer ...",
+   "content": "hey peeps Anyone using llama cpp’s ... models. The llama rpc-server will constantly consume memory during inference but without releasing it and ultimately resulting in OOM error at some point....",
+   "img_src": "",
+   "iframe_src": "",
+   "audio_src": "",
+   "thumbnail": "https://imgs.search.brave.com/fUnsXBZGso7P8IFTAtVRlYmS06KfxOzFW_mfSObLxlc/rs:fit:200:200:1:0/g:ce/aHR0cHM6Ly9nbG9i/YWwuZGlzY291cnNl/LWNkbi5jb20vbnZp/ZGlhL29yaWdpbmFs/LzNYL2UvNC9lNDFk/Mjc0OTFlZTcyNTYy/Y2Y2OGMzNDA1OTdj/YTk1ZjU4Nzg3OWJk/LnBuZw",
+   "publishedDate": "2026-02-26T22:47:05",
+   "pubdate": "2026-02-26 22:47:05",
+   "length": null,
+   "views": "",
+   "author": "",
+   "metadata": "",
+   "priority": "",
+   "engines": [
+    "google cse",
+    "brave"
+   ],
+   "open_group": false,
+   "close_group": false,
+   "positions": [
+    7,
+    7
+   ],
+   "score": 0.5714285714285714,
+   "category": "general",
+   "url": "https://forums.developer.nvidia.com/t/llama-cpp-rpc-on-dgx-spark/361862",
+   "engine": "brave",
+   "parsed_url": [
+    "https",
+    "forums.developer.nvidia.com",
+    "/t/llama-cpp-rpc-on-dgx-spark/361862",
+    "",
+    "",
+    ""
+   ]
+  },
+  {
+   "template": "default.html",
+   "title": "llama.cpp/tools/server/README.md at master · ggml-org ... - GitHub",
+   "content": "Besides the built-in tools, the server can expose tools coming from MCP servers, added in #26062. Only the stdio transport is supported: such a server is a child process reading JSON-RPC messages on its stdin and writing replies on its stdout, so nothing has to be started or maintained outside llama-server.",
+   "img_src": "",
+   "iframe_src": "",
+   "audio_src": "",
+   "thumbnail": "https://imgs.search.brave.com/dnABgxXEtSf7EqzipjJ16rEaEXDvGL71ehK6oqcFPQU/rs:fit:200:200:1:0/g:ce/aHR0cHM6Ly9yZXBv/c2l0b3J5LWltYWdl/cy5naXRodWJ1c2Vy/Y29udGVudC5jb20v/NjEyMzU0Nzg0Lzhi/OWViMGVjLTY1MTct/NDRhOS04YTNhLWZj/Y2RkYzY3OGU1Nw",
+   "publishedDate": "2026-07-28T15:10:06",
+   "pubdate": "2026-07-28 15:10:06",
+   "length": null,
+   "views": "",
+   "author": "",
+   "metadata": "",
+   "priority": "",
+   "engines": [
+    "google cse",
+    "brave"
+   ],
+   "open_group": false,
+   "close_group": false,
+   "positions": [
+    9,
+    10
+   ],
+   "score": 0.4222222222222222,
+   "category": "general",
+   "url": "https://github.com/ggml-org/llama.cpp/blob/master/tools/server/README.md",
+   "engine": "brave",
+   "parsed_url": [
+    "https",
+    "github.com",
+    "/ggml-org/llama.cpp/blob/master/tools/server/README.md",
+    "",
+    "",
+    ""
+   ]
+  }
+ ],
+ "answers": [],
+ "corrections": [],
+ "infoboxes": [],
+ "suggestions": [
+  "llama cpp rpc performance",
+  "llama cpp rpc slow",
+  "llama cpp rpc server reddit"
+ ],
+ "unresponsive_engines": [
+  [
+   "duckduckgo",
+   "CAPTCHA"
+  ]
+ ],
+ "_captured": "searxng/searxng@4e2c1ea, 2026-09-29, GET /search?q=llama.cpp+rpc+server&format=json (trimmed to 8 of 34 results)"
+}
