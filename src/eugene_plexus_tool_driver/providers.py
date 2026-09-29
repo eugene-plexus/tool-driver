@@ -65,6 +65,9 @@ class Provider:
     #: search the operator pays for.
     probes: bool
     search: SearchFn
+    #: `free` or `per_search`, reported on `/v1/info` so the gateway tries
+    #: a free account before one that bills.
+    billing: str = "per_search"
 
     def missing(self, account: Account) -> str | None:
         """What the account still needs before it can search, or None."""
@@ -300,6 +303,7 @@ PROVIDERS: dict[str, Provider] = {
         needs_key=False,
         probes=True,
         search=search_searxng,
+        billing="free",
     ),
     "brave": Provider(
         key="brave",

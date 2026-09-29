@@ -5,7 +5,7 @@ from __future__ import annotations
 from fastapi import APIRouter, Request
 
 from .. import __version__
-from .._generated.models import Egress, ToolDriverInfo, ToolName
+from .._generated.models import Egress, ToolBilling, ToolDriverInfo, ToolName
 from ..providers import PROVIDERS
 from ..service import SearchService
 
@@ -27,5 +27,6 @@ async def info(request: Request) -> ToolDriverInfo:
         tools=[ToolName.web_search] if configured else [],
         egress=Egress.internet,
         configured=configured,
+        billing=ToolBilling(provider.billing) if provider is not None else ToolBilling.per_search,
         version=__version__,
     )

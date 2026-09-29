@@ -334,6 +334,7 @@ def test_an_account_with_no_address_offers_nothing_and_says_why(tmp_path, nowher
 def test_brave_without_a_key_is_not_set_up(tmp_path, nowhere) -> None:
     with _client(tmp_path, {"provider": "brave"}, nowhere, nowhere) as client:
         assert client.get("/v1/info").json()["configured"] is False
+        assert client.get("/v1/info").json()["billing"] == "per_search"
         assert "API key" in search(client).json()["detail"]
 
 
@@ -345,6 +346,7 @@ def test_a_configured_account_offers_web_search_and_reports_healthy(searx_client
         "tools": ["web_search"],
         "egress": "internet",
         "configured": True,
+        "billing": "free",
         "version": info["version"],
     }
     assert searx_client.get("/healthz").json()["status"] == "ok"
