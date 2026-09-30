@@ -30,8 +30,9 @@ async def get_config(request: Request) -> ConfigDocument:
 
 
 @router.get("/v1/config/schema", response_model=ConfigSchema)
-async def get_config_schema() -> ConfigSchema:
-    return as_schema()
+async def get_config_schema(request: Request) -> ConfigSchema:
+    store: ConfigStore = request.app.state.config_store
+    return as_schema(values=store.snapshot(), pending=store.pending_restart())
 
 
 @router.patch("/v1/config", response_model=ConfigUpdateResult)

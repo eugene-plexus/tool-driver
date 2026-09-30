@@ -14,6 +14,7 @@ change an address was a cost with no reason behind it.
 from __future__ import annotations
 
 import logging
+import math
 import re
 import threading
 from pathlib import Path
@@ -173,8 +174,50 @@ FIELDS: list[ConfigField] = _build_fields()
 _FIELDS_BY_KEY: dict[str, ConfigField] = {f.key: f for f in FIELDS}
 
 
-def as_schema() -> ConfigSchema:
-    return ConfigSchema(component="tool-driver", fields=list(FIELDS), categories=CATEGORY_LABELS)
+def _unset_facts(key: str, values: dict[str, Any]) -> dict[str, Any]:
+    """What an unset `key` does for the provider this account uses now
+    (settings never lie, 2026-09-30)."""
+    provider = str(values.get("provider") or "searxng")
+    if key == "baseUrl":
+        if provider == "brave":
+            from .providers import BRAVE_URL
+
+            return {
+                "unsetMeans": f"Not set: uses Brave's own address, {BRAVE_URL}.",
+                "unsetResolvesTo": BRAVE_URL,
+            }
+        return {
+            "unsetMeans": "Not set: a SearXNG account needs its address, so it searches nothing."
+        }
+    if key == "language":
+        return {"unsetMeans": "Not set: the search service's own default language."}
+    if key == "apiKey":
+        return {"unsetMeans": "Not set: Brave refuses a search without a key."}
+    return {}
+
+
+def as_schema(
+    *, values: dict[str, Any] | None = None, pending: dict[str, Any] | None = None
+) -> ConfigSchema:
+    fields: list[ConfigField] = []
+    for field in FIELDS:
+        update: dict[str, Any] = {}
+        if values is not None and values.get(field.key) in (None, ""):
+            update.update(_unset_facts(field.key, values))
+        if pending and field.key in pending:
+            update["pendingRestart"] = True
+            if not field.sensitive:
+                update["inEffect"] = pending[field.key]
+        fields.append(field.model_copy(update=update) if update else field)
+    return ConfigSchema(component="tool-driver", fields=fields, categories=CATEGORY_LABELS)
+
+
+def _is_unset(field: ConfigField, value: Any) -> bool:
+    """None, or an empty secret: an empty key is no key."""
+    if value is None:
+        return True
+    is_secret = field.valueType == ConfigValueType.secret
+    return is_secret and isinstance(value, str) and not value.strip()
 
 
 def _defaults() -> dict[str, Any]:
@@ -205,6 +248,8 @@ def _validate_value(field: ConfigField, value: Any) -> str | None:
             return f"expected number, got {type(value).__name__}"
         if vt == ConfigValueType.integer and not isinstance(value, int):
             return f"expected integer, got {type(value).__name__}"
+        if not math.isfinite(value):
+            return "must be a finite number"
         if field.minimum is not None and value < field.minimum:
             return f"must be >= {field.minimum}"
         if field.maximum is not None and value > field.maximum:
@@ -232,7 +277,8 @@ class ConfigStore:
         self._path = path
         self._lock = threading.Lock()
         self._values: dict[str, Any] = _defaults()
-        self._pending_restart: set[str] = set()
+        # What this process runs on for every `requiresRestart` field.
+        self._started: dict[str, Any] = dict(self._values)
         self._master_key = master_key
 
     def load(self) -> None:
@@ -243,12 +289,19 @@ class ConfigStore:
                     raise ValueError(f"config file {self._path} must be a YAML mapping at the root")
                 merged = _defaults()
                 for key, value in raw.items():
-                    if key in _FIELDS_BY_KEY:
-                        merged[key] = self._opened(key, value)
+                    field = _FIELDS_BY_KEY.get(key)
+                    if field is None:
+                        continue
+                    value = self._opened(key, value)
+                    # A null in the file is the default, as a PATCH of null
+                    # is: `probeMinutes: null` turned the probe off while
+                    # the schema said every ten minutes.
+                    merged[key] = field.default if _is_unset(field, value) else value
                 self._values = merged
             else:
                 self._values = _defaults()
                 self._write_locked()
+            self._started = dict(self._values)
 
     def _opened(self, key: str, value: Any) -> Any:
         if not security.is_envelope(value):
@@ -277,6 +330,7 @@ class ConfigStore:
     def apply_patch(self, request: ConfigUpdateRequest) -> ConfigUpdateResult:
         applied: list[str] = []
         rejected: list[ConfigFieldError] = []
+        pending: list[str] = []
         patch: dict[str, Any] = request.model_dump()
         with self._lock:
             for key, new_value in patch.items():
@@ -288,20 +342,32 @@ class ConfigStore:
                 if err is not None:
                     rejected.append(ConfigFieldError(key=key, message=err))
                     continue
+                if _is_unset(field, new_value):
+                    new_value = None
                 self._values[key] = (
                     field.default if new_value is None and field.default is not None else new_value
                 )
                 applied.append(key)
-                if field.requiresRestart:
-                    self._pending_restart.add(key)
+                # This PATCH's keys, while they differ from what the process
+                # runs on -- not every restart key saved since start.
+                if field.requiresRestart and self._values.get(key) != self._started.get(key):
+                    pending.append(key)
             if applied:
                 self._write_locked()
             return ConfigUpdateResult(
                 applied=applied,
                 rejected=rejected,
-                requiresRestart=bool(self._pending_restart),
-                pendingRestart=sorted(self._pending_restart),
+                requiresRestart=bool(pending),
+                pendingRestart=pending,
             )
+
+    def pending_restart(self) -> dict[str, Any]:
+        with self._lock:
+            return {
+                f.key: self._started.get(f.key)
+                for f in FIELDS
+                if f.requiresRestart and self._values.get(f.key) != self._started.get(f.key)
+            }
 
     def get(self, key: str) -> Any:
         with self._lock:
