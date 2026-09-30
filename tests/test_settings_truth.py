@@ -47,3 +47,12 @@ def test_an_empty_key_is_no_key_and_restarts_are_per_patch(tmp_path: Path) -> No
         f for f in as_schema(pending=store.pending_restart()).fields if f.key == "logLevel"
     )
     assert field.pendingRestart is True and field.inEffect == "INFO"
+
+
+def test_a_restart_key_set_back_to_the_running_value_needs_nothing(tmp_path: Path) -> None:
+    store = ConfigStore(tmp_path / "search.yaml")
+    store.load()
+    store.apply_patch(ConfigUpdateRequest.model_validate({"logLevel": "DEBUG"}))
+    back = store.apply_patch(ConfigUpdateRequest.model_validate({"logLevel": "INFO"}))
+    assert back.requiresRestart is False and back.pendingRestart == []
+    assert store.pending_restart() == {}
