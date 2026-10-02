@@ -133,13 +133,28 @@ def _build_fields() -> list[ConfigField]:
             label="Search timeout",
             description=(
                 "How long one search may take before it is reported to the model "
-                "as failed. A model waits on this, so it is short."
+                "as failed, waiting its turn and one retry included. A model waits "
+                "on this, so it is short."
             ),
             category="network",
             valueType=ConfigValueType.duration,
             default=15,
             minimum=2,
             maximum=120,
+        ),
+        ConfigField(
+            key="searchIntervalSeconds",
+            label="Time between searches",
+            description=(
+                "The shortest wait between one search's answer and the next search "
+                "sent to the provider. Above 0, searches take turns, two chats' "
+                "included, so a provider that allows one search a second does not "
+                "refuse the second. 0 sends searches as they come."
+            ),
+            category="network",
+            valueType=ConfigValueType.duration,
+            minimum=0,
+            maximum=60,
         ),
         ConfigField(
             key="probeMinutes",
@@ -191,6 +206,17 @@ def _unset_facts(key: str, values: dict[str, Any]) -> dict[str, Any]:
         }
     if key == "language":
         return {"unsetMeans": "Not set: the search service's own default language."}
+    if key == "searchIntervalSeconds":
+        found = PROVIDERS.get(provider)
+        interval = found.search_interval if found is not None else 0.0
+        if found is not None and interval > 0:
+            means = (
+                f"Not set: {interval:g}s between searches, the pace {found.label} documents "
+                "for its free plan. A paid plan allows more; set a shorter wait for one."
+            )
+        else:
+            means = "Not set: searches are sent as they come, with no wait between them."
+        return {"unsetMeans": means, "unsetResolvesTo": interval}
     if key == "apiKey":
         return {"unsetMeans": "Not set: Brave refuses a search without a key."}
     return {}

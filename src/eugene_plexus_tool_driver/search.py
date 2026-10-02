@@ -20,7 +20,8 @@ real thing where this box could reach it:
   `GET https://api.search.brave.com/res/v1/web/search` with
   `X-Subscription-Token`; `count` at most 20; `web.results[]` with
   `title`, `url`, `description`, `age`, `page_age`, `extra_snippets`;
-  401 for a bad key, 422 for bad parameters, 429 when rate limited.
+  401 for a bad key, 422 for bad parameters, 429 when rate limited, with
+  the limits in `X-RateLimit-*` headers (`providers._brave_limited`).
 
 **Filtering is ours, always.** A provider may be told about allowed
 domains (a `site:` operator when there is exactly one), but what comes
@@ -46,17 +47,28 @@ class SearchFailure(Exception):
     """A provider failed, with the status the tool-driver answers and why.
 
     `code` is the problem's machine name (`upstream_auth_error`,
-    `rate_limited`, `json_disabled`, `upstream_error`, `timeout`,
-    `not_configured`); `retry_after` is the provider's own `Retry-After`,
-    in seconds, when it gave one.
+    `rate_limited`, `quota_exhausted`, `json_disabled`, `upstream_error`,
+    `timeout`, `not_configured`); `retry_after` is how long the provider
+    asked us to wait, in seconds, when it said. `worth_a_retry` is the
+    provider saying a short wait will do: refused for coming too soon,
+    not for a quota that is used up.
     """
 
-    def __init__(self, status: int, code: str, detail: str, retry_after: float | None = None):
+    def __init__(
+        self,
+        status: int,
+        code: str,
+        detail: str,
+        retry_after: float | None = None,
+        *,
+        worth_a_retry: bool = False,
+    ):
         super().__init__(detail)
         self.status = status
         self.code = code
         self.detail = detail
         self.retry_after = retry_after
+        self.worth_a_retry = worth_a_retry
 
 
 @dataclass

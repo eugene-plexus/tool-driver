@@ -13,6 +13,7 @@ that sentence is what the model is handed and then what a person reads.
 from __future__ import annotations
 
 import logging
+import math
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any
@@ -40,6 +41,7 @@ class Query:
     context_size: str | None
     safe_search: str
     language: str | None
+    #: Seconds this request may take: what is left of the search's timeout.
     timeout: float
 
 
@@ -68,6 +70,9 @@ class Provider:
     #: `free` or `per_search`, reported on `/v1/info` so the gateway tries
     #: a free account before one that bills.
     billing: str = "per_search"
+    #: Seconds from one answer to the next search when the operator sets
+    #: none (`searchIntervalSeconds`); 0 sends searches as they come.
+    search_interval: float = 0.0
 
     def missing(self, account: Account) -> str | None:
         """What the account still needs before it can search, or None."""
@@ -100,7 +105,11 @@ async def _get(
     try:
         return await client.get(url, params=params, headers=headers, timeout=seconds)
     except httpx.TimeoutException:
-        raise SearchFailure(504, "timeout", f"{who} did not answer within {seconds:g}s") from None
+        # `seconds` is what was left of the search's timeout, so it is
+        # rarely a round number.
+        raise SearchFailure(
+            504, "timeout", f"{who} did not answer within {round(seconds, 1):g}s"
+        ) from None
     except httpx.HTTPError as exc:
         raise SearchFailure(
             502, "unreachable", f"{who} could not be reached at {url} ({type(exc).__name__})"
@@ -237,12 +246,7 @@ async def search_brave(client: httpx.AsyncClient, account: Account, query: Query
             "Check the key on the search account's settings.",
         )
     if response.status_code == 429:
-        raise SearchFailure(
-            429,
-            "rate_limited",
-            "Brave Search says this key is over its rate or monthly limit (HTTP 429).",
-            retry_after=_retry_after(response),
-        )
+        raise _brave_limited(response)
     if response.status_code == 422:
         raise SearchFailure(
             502,
@@ -295,6 +299,88 @@ def _brave_detail(response: httpx.Response) -> str:
     return str(body)[:200]
 
 
+def _brave_limited(response: httpx.Response) -> SearchFailure:
+    """Brave's 429, read for whether a short wait will do.
+
+    Brave documents its limits as headers holding one comma-separated
+    value per window, shortest first: `X-RateLimit-Remaining: 0, 1500` is
+    no search left this second and 1,500 this month, and
+    `X-RateLimit-Reset: 1, 1419704` the seconds until each window starts
+    again. From its documentation, not measured: there is no Brave key on
+    the development box, so the first live 429 is the check on this.
+
+    * A window after the first with nothing left is the monthly quota,
+      used up. No wait inside a search ends it, so it is not retried, and
+      the person reads "quota", not "too fast".
+    * Anything else is too fast, and worth one retry after the first
+      window's reset or the `Retry-After`, whichever is longer.
+    * A header that is missing, or does not read as a number for every
+      window, is treated as absent. With no `Remaining`, nothing says the
+      month is used up; with no wait at all, the retry waits one pacing
+      interval (`SearchService._paced`).
+    """
+    remaining = _per_window(response, "x-ratelimit-remaining")
+    reset = _per_window(response, "x-ratelimit-reset")
+    if remaining is not None and reset is not None and len(remaining) != len(reset):
+        # Two headers that disagree on how many windows there are cannot
+        # be paired, so neither is believed.
+        remaining = reset = None
+    retry_after = _retry_after(response)
+    used_up = [i for i, left in enumerate(remaining or []) if i > 0 and left == 0]
+    if used_up:
+        resets_in = max(reset[i] for i in used_up) if reset is not None else retry_after
+        when = f"; it resets in {_in_words(resets_in)}" if resets_in is not None else ""
+        return SearchFailure(
+            429,
+            "quota_exhausted",
+            f"Brave Search says this key's monthly quota is used up (HTTP 429){when}.",
+            retry_after=resets_in,
+        )
+    waits = [w for w in (retry_after, reset[0] if reset is not None else None) if w is not None]
+    # One window says nothing about the month; two with the later one not
+    # used up say it was the pace.
+    cause = (
+        "is searching faster than its plan allows"
+        if remaining is not None and len(remaining) > 1
+        else "is over its rate or monthly limit"
+    )
+    return SearchFailure(
+        429,
+        "rate_limited",
+        f"Brave Search says this key {cause} (HTTP 429).",
+        retry_after=max(waits) if waits else None,
+        worth_a_retry=True,
+    )
+
+
+def _per_window(response: httpx.Response, name: str) -> list[float] | None:
+    """A comma-separated `X-RateLimit-*` header as one number per window.
+
+    None when it is missing or any part is not a finite number of zero or
+    more: a header read halfway is not one to decide on.
+    """
+    value = response.headers.get(name)
+    if not value:
+        return None
+    try:
+        numbers = [float(part) for part in value.split(",")]
+    except ValueError:
+        return None
+    if not all(math.isfinite(n) and n >= 0 for n in numbers):
+        return None
+    return numbers
+
+
+def _in_words(seconds: float) -> str:
+    """A wait as a person says it: `about 16 days`, `about 3 hours`, `40 seconds`."""
+    for unit, size in (("day", 86400), ("hour", 3600), ("minute", 60)):
+        if seconds >= size:
+            count = round(seconds / size)
+            return f"about {count} {unit}{'' if count == 1 else 's'}"
+    count = math.ceil(seconds)
+    return f"{count} second{'' if count == 1 else 's'}"
+
+
 PROVIDERS: dict[str, Provider] = {
     "searxng": Provider(
         key="searxng",
@@ -312,6 +398,10 @@ PROVIDERS: dict[str, Provider] = {
         needs_key=True,
         probes=False,
         search=search_brave,
+        # Brave's documentation gives its free plan one request a second.
+        # Not measured: there is no Brave key on the development box. A
+        # paid plan allows more, and its owner can set the gap lower.
+        search_interval=1.0,
     ),
 }
 

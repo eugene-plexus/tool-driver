@@ -57,7 +57,11 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
             # mode is required).
             app.state.config_error = f"config file {settings.config_file} could not be read: {e}"
             log.error("%s; running on defaults", app.state.config_error)
-    service = SearchService(store, transports=getattr(app.state, "search_transports", None))
+    service = SearchService(
+        store,
+        transports=getattr(app.state, "search_transports", None),
+        timing=getattr(app.state, "search_timing", None),
+    )
     app.state.search = None if settings.safe_mode else service
     if not settings.safe_mode:
         service.start_probe()

@@ -7,8 +7,9 @@ documentation, because there is no Brave key on the development box.
 
 from __future__ import annotations
 
+import asyncio
 import json
-from collections.abc import Callable, Iterator
+from collections.abc import Awaitable, Callable, Iterator
 from pathlib import Path
 from typing import Any
 
@@ -17,8 +18,20 @@ import pytest
 import yaml
 from fastapi.testclient import TestClient
 
+from eugene_plexus_tool_driver._generated.models import ConfigUpdateRequest, WebSearchRequest
 from eugene_plexus_tool_driver.app import create_app
-from eugene_plexus_tool_driver.search import Hit, domain_matches, keep, plain, with_site
+from eugene_plexus_tool_driver.config import ConfigStore
+from eugene_plexus_tool_driver.pacing import Clock, Sleep
+from eugene_plexus_tool_driver.providers import _brave_limited
+from eugene_plexus_tool_driver.search import (
+    Hit,
+    SearchFailure,
+    domain_matches,
+    keep,
+    plain,
+    with_site,
+)
+from eugene_plexus_tool_driver.service import SearchService
 from eugene_plexus_tool_driver.settings import Settings
 
 FIXTURES = Path(__file__).parent / "fixtures"
@@ -47,7 +60,7 @@ BRAVE = {
     },
 }
 
-Handler = Callable[[httpx.Request], httpx.Response]
+Handler = Callable[[httpx.Request], httpx.Response | Awaitable[httpx.Response]]
 
 
 class Upstream:
@@ -65,11 +78,40 @@ class Upstream:
         return httpx.MockTransport(respond)
 
 
-def _client(tmp_path: Path, config: dict[str, Any], lan: Upstream, public: Upstream) -> TestClient:
+class FakeTime:
+    """A clock that moves only when slept on or told to, so a wait is
+    asserted in exact seconds and no test spends a real one."""
+
+    def __init__(self) -> None:
+        self.now = 1000.0
+        self.slept: list[float] = []
+
+    def clock(self) -> float:
+        return self.now
+
+    async def sleep(self, seconds: float) -> None:
+        self.slept.append(seconds)
+        self.now += seconds
+        await asyncio.sleep(0)
+
+    def timing(self) -> tuple[Clock, Sleep]:
+        return self.clock, self.sleep
+
+
+def _client(
+    tmp_path: Path,
+    config: dict[str, Any],
+    lan: Upstream,
+    public: Upstream,
+    *,
+    time: FakeTime | None = None,
+) -> TestClient:
     config_file = tmp_path / "search.yaml"
     config_file.write_text(yaml.safe_dump({"probeMinutes": 0, **config}), encoding="utf-8")
     app = create_app(Settings(config_file=config_file))
     app.state.search_transports = (lan.transport(), public.transport())
+    if time is not None:
+        app.state.search_timing = time.timing()
     return TestClient(app)
 
 
@@ -172,14 +214,22 @@ def test_json_output_switched_off_is_named(tmp_path, nowhere) -> None:
 
 def test_a_limiter_is_a_429_with_its_retry_after(tmp_path, nowhere) -> None:
     busy = Upstream(lambda request: httpx.Response(429, headers={"Retry-After": "7"}, text="slow"))
+    time = FakeTime()
     with _client(
-        tmp_path, {"provider": "searxng", "baseUrl": "http://192.168.1.20:8888"}, busy, nowhere
+        tmp_path,
+        {"provider": "searxng", "baseUrl": "http://192.168.1.20:8888"},
+        busy,
+        nowhere,
+        time=time,
     ) as client:
         response = search(client)
     assert response.status_code == 429
     assert response.headers["Retry-After"] == "7"
     assert response.json()["code"] == "rate_limited"
     assert "limiter" in response.json()["detail"]
+    # Handed straight back, deliberately: only Brave's refusal says whether
+    # a short wait will do, and a 7s wait would fit a 15s search.
+    assert len(busy.seen) == 1 and time.slept == []
 
 
 def test_a_slow_or_absent_instance_is_a_timeout_or_unreachable(tmp_path, nowhere) -> None:
@@ -252,9 +302,15 @@ def brave() -> Upstream:
     return Upstream(lambda request: httpx.Response(200, json=BRAVE))
 
 
-def brave_client(tmp_path: Path, public: Upstream, lan: Upstream, **config: Any) -> TestClient:
+def brave_client(
+    tmp_path: Path, public: Upstream, lan: Upstream, *, time: FakeTime | None = None, **config: Any
+) -> TestClient:
     return _client(
-        tmp_path, {"provider": "brave", "apiKey": "brave-test-key", **config}, lan, public
+        tmp_path,
+        {"provider": "brave", "apiKey": "brave-test-key", **config},
+        lan,
+        public,
+        time=time,
     )
 
 
@@ -294,10 +350,17 @@ def test_a_refused_brave_key_is_our_credential_not_the_callers_request(tmp_path,
 
 
 def test_brave_over_its_limit_and_a_bad_parameter(tmp_path, nowhere) -> None:
+    # tool-driver#3 changed this deliberately: a short refusal is tried
+    # once more, and only the second comes back -- still a 429 with its
+    # Retry-After, so the gateway moves on to another account if it has one.
     busy = Upstream(lambda request: httpx.Response(429, headers={"Retry-After": "2"}))
-    with brave_client(tmp_path, busy, nowhere) as client:
+    time = FakeTime()
+    with brave_client(tmp_path, busy, nowhere, time=time) as client:
         response = search(client)
     assert response.status_code == 429 and response.headers["Retry-After"] == "2"
+    assert response.json()["code"] == "rate_limited"
+    assert "tried once more after 2s" in response.json()["detail"]
+    assert len(busy.seen) == 2 and time.slept == [2.0]
     bad = Upstream(
         lambda request: httpx.Response(
             422, json={"type": "ErrorResponse", "error": {"detail": "count too large"}}
@@ -313,6 +376,290 @@ def test_brave_blocked_domains_are_removed_after_the_fact(tmp_path, brave, nowhe
         body = search(client, blockedDomains=["example.net"]).json()
     assert [r["url"] for r in body["results"]] == ["https://github.com/eugene-plexus"]
     assert brave.seen[0].url.params["count"] == "10"
+
+
+# --- Brave's limits: taking turns, and one retry (tool-driver#3) -----------
+
+#: Seconds left in Brave's monthly window, from its documentation's example.
+MONTH = "1419704"
+
+
+def brave_answers(*answers: dict[str, str] | None) -> Upstream:
+    """Brave answering each in turn, then the last one again: a dict is a
+    429 carrying those headers, None the documented results."""
+    left = list(answers)
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        answer = left.pop(0) if len(left) > 1 else left[0]
+        if answer is None:
+            return httpx.Response(200, json=BRAVE)
+        return httpx.Response(
+            429,
+            headers=answer,
+            json={"type": "ErrorResponse", "error": {"code": "RATE_LIMITED", "status": 429}},
+        )
+
+    return Upstream(respond)
+
+
+def _service(tmp_path: Path, upstream: Upstream, time: FakeTime, **config: Any) -> SearchService:
+    store = ConfigStore(tmp_path / "search.yaml")
+    store.load()
+    store.apply_patch(ConfigUpdateRequest.model_validate({"probeMinutes": 0, **config}))
+    transport = upstream.transport()
+    return SearchService(store, transports=(transport, transport), timing=time.timing())
+
+
+class InFlight:
+    """An upstream that counts how many searches it is answering at once."""
+
+    def __init__(self, body: dict[str, Any]) -> None:
+        self.now = self.peak = 0
+        self.body = body
+
+    async def __call__(self, request: httpx.Request) -> httpx.Response:
+        self.now += 1
+        self.peak = max(self.peak, self.now)
+        # Real, and long enough for another search to start if it may.
+        await asyncio.sleep(0.005)
+        self.now -= 1
+        return httpx.Response(200, json=self.body)
+
+
+def test_brave_searches_are_spaced_from_the_last_answer(tmp_path, nowhere) -> None:
+    time = FakeTime()
+    sent: list[float] = []
+
+    def answers_in_0_4s(request: httpx.Request) -> httpx.Response:
+        sent.append(time.now)
+        time.now += 0.4
+        return httpx.Response(200, json=BRAVE)
+
+    with brave_client(tmp_path, Upstream(answers_in_0_4s), nowhere, time=time) as client:
+        assert search(client).status_code == 200
+        assert search(client).status_code == 200
+        time.now += 5
+        assert search(client).status_code == 200
+    # A full second after the first ANSWER, so 1.4s after the first request:
+    # spacing the requests would let two arrive inside one of Brave's seconds.
+    assert time.slept == pytest.approx([1.0])
+    assert sent[1] - sent[0] == pytest.approx(1.4)
+    # And nothing is waited once the second has passed by itself.
+    assert sent[2] - sent[1] == pytest.approx(5.4)
+
+
+async def test_searches_on_a_paced_account_take_turns(tmp_path) -> None:
+    time = FakeTime()
+    upstream = InFlight(BRAVE)
+    seen = Upstream(upstream)
+    service = _service(tmp_path, seen, time, provider="brave", apiKey="k")
+    try:
+        found = await asyncio.gather(
+            *(service.web_search(WebSearchRequest(query=f"chat {n}")) for n in range(3))
+        )
+    finally:
+        await service.aclose()
+    assert all(answer.results for answer in found) and len(seen.seen) == 3
+    assert upstream.peak == 1
+    assert time.slept == pytest.approx([1.0, 1.0])
+    # Waiting for a turn is part of the search's 15s, not on top of it.
+    assert [r.extensions["timeout"]["read"] for r in seen.seen] == pytest.approx([15, 14, 13])
+
+
+async def test_an_account_takes_no_turns_unless_it_is_paced(tmp_path) -> None:
+    time = FakeTime()
+    searxng = InFlight(SEARXNG)
+    service = _service(
+        tmp_path, Upstream(searxng), time, provider="searxng", baseUrl="http://192.168.1.20:8888"
+    )
+    try:
+        await asyncio.gather(*(service.web_search(WebSearchRequest(query="q")) for _ in range(2)))
+        # SearXNG is not paced by default: the two ran side by side.
+        assert searxng.peak == 2 and time.slept == []
+        service.store.apply_patch(
+            ConfigUpdateRequest.model_validate({"searchIntervalSeconds": 0.5})
+        )
+        searxng.peak = 0
+        await asyncio.gather(*(service.web_search(WebSearchRequest(query="q")) for _ in range(2)))
+        # Paced now, and the first gap counts from the last answer, paced or not.
+        assert searxng.peak == 1 and time.slept == pytest.approx([0.5, 0.5])
+    finally:
+        await service.aclose()
+
+    # And a Brave account its owner set to 0 (a paid plan) is not paced:
+    # 0 is a choice, not "unset".
+    brave = InFlight(BRAVE)
+    service = _service(
+        tmp_path, Upstream(brave), FakeTime(), provider="brave", apiKey="k", searchIntervalSeconds=0
+    )
+    try:
+        await asyncio.gather(*(service.web_search(WebSearchRequest(query="q")) for _ in range(2)))
+    finally:
+        await service.aclose()
+    assert brave.peak == 2
+
+
+@pytest.mark.parametrize(
+    ("reset", "waited"),
+    [(f"3, {MONTH}", 3.0), (f"0, {MONTH}", 1.0)],
+    ids=["for-the-windows-reset", "never-less-than-the-interval"],
+)
+def test_a_too_soon_refusal_is_tried_once_more_and_answered(
+    tmp_path, nowhere, reset, waited
+) -> None:
+    time = FakeTime()
+    brave = brave_answers({"X-RateLimit-Remaining": "0, 1500", "X-RateLimit-Reset": reset}, None)
+    with brave_client(tmp_path, brave, nowhere, time=time) as client:
+        response = search(client)
+        assert response.status_code == 200, response.text
+        assert client.get("/healthz").json()["details"]["lastSearchOk"] is True
+    assert response.json()["results"]
+    assert len(brave.seen) == 2 and time.slept == [waited]
+    # The retry has what is left of the search's 15s, not 15s more.
+    timeouts = [r.extensions["timeout"]["read"] for r in brave.seen]
+    assert timeouts == pytest.approx([15, 15 - waited])
+
+
+def test_a_retry_that_finds_the_month_used_up_says_quota(tmp_path, nowhere) -> None:
+    time = FakeTime()
+    brave = brave_answers(
+        {"X-RateLimit-Remaining": "0, 1", "X-RateLimit-Reset": f"1, {MONTH}"},
+        {"X-RateLimit-Remaining": "0, 0", "X-RateLimit-Reset": f"1, {MONTH}"},
+    )
+    with brave_client(tmp_path, brave, nowhere, time=time) as client:
+        response = search(client)
+    assert response.status_code == 429 and response.headers["Retry-After"] == MONTH
+    problem = response.json()
+    assert problem["code"] == "quota_exhausted"
+    assert problem["detail"].endswith("resets in about 16 days. It was tried once more after 1s.")
+    assert len(brave.seen) == 2 and time.slept == [1.0]
+
+
+def test_a_second_refusal_comes_back_as_a_429_with_its_wait(tmp_path, nowhere) -> None:
+    time = FakeTime()
+    brave = brave_answers({"X-RateLimit-Remaining": "0, 1500", "X-RateLimit-Reset": f"1, {MONTH}"})
+    with brave_client(tmp_path, brave, nowhere, time=time) as client:
+        response = search(client)
+    assert response.status_code == 429 and response.headers["Retry-After"] == "1"
+    problem = response.json()
+    assert problem["code"] == "rate_limited"
+    assert "faster than its plan allows" in problem["detail"]
+    assert "tried once more after 1s" in problem["detail"]
+    assert len(brave.seen) == 2 and time.slept == [1.0]
+
+
+@pytest.mark.parametrize(
+    ("headers", "resets"),
+    [
+        ({"X-RateLimit-Remaining": "1, 0", "X-RateLimit-Reset": f"1, {MONTH}"}, MONTH),
+        ({"X-RateLimit-Remaining": "0, 0", "X-RateLimit-Reset": f"1, {MONTH}"}, MONTH),
+        ({"X-RateLimit-Remaining": "1, 0"}, None),
+    ],
+    ids=["month-used-up", "second-and-month-used-up", "no-reset-given"],
+)
+def test_a_used_up_month_says_quota_and_is_not_retried(tmp_path, nowhere, headers, resets) -> None:
+    time = FakeTime()
+    brave = brave_answers(headers)
+    with brave_client(tmp_path, brave, nowhere, time=time) as client:
+        response = search(client)
+        health = client.get("/healthz").json()
+    assert response.status_code == 429
+    problem = response.json()
+    assert problem["code"] == "quota_exhausted"
+    assert "monthly quota is used up" in problem["detail"]
+    assert ("resets in about 16 days" in problem["detail"]) == (resets is not None)
+    assert response.headers.get("Retry-After") == resets
+    assert len(brave.seen) == 1 and time.slept == []
+    assert health["details"]["code"] == "quota_exhausted"
+
+
+@pytest.mark.parametrize(
+    ("reset", "refusal_takes"),
+    [(f"20, {MONTH}", 0.0), (f"10, {MONTH}", 3.0)],
+    ids=["longer-than-the-timeout", "no-room-left-for-the-answer"],
+)
+def test_a_wait_the_search_timeout_cannot_hold_is_not_taken(
+    tmp_path, nowhere, reset, refusal_takes
+) -> None:
+    time = FakeTime()
+
+    def refuse(request: httpx.Request) -> httpx.Response:
+        time.now += refusal_takes
+        return httpx.Response(
+            429, headers={"X-RateLimit-Remaining": "0, 1500", "X-RateLimit-Reset": reset}
+        )
+
+    brave = Upstream(refuse)
+    with brave_client(tmp_path, brave, nowhere, time=time, timeoutSeconds=15) as client:
+        response = search(client)
+    assert response.status_code == 429 and response.json()["code"] == "rate_limited"
+    assert response.headers["Retry-After"] == reset.split(",")[0]
+    assert len(brave.seen) == 1 and time.slept == []
+
+
+@pytest.mark.parametrize(
+    "headers",
+    [
+        {},
+        {"X-RateLimit-Remaining": "lots, 0", "X-RateLimit-Reset": f"1, {MONTH}"},
+        {"X-RateLimit-Remaining": "1, 0", "X-RateLimit-Reset": "1, 2, 3"},
+        {"X-RateLimit-Remaining": "-1, 0"},
+        {"X-RateLimit-Remaining": "", "X-RateLimit-Reset": ","},
+        {"X-RateLimit-Reset": "nan, inf"},
+        {"X-RateLimit-Reset": "soon"},
+        {"Retry-After": "Wed, 01 Oct 2026 12:00:00 GMT"},
+    ],
+    ids=[
+        "none",
+        "remaining-not-numbers",
+        "windows-disagree",
+        "negative",
+        "empty",
+        "not-finite",
+        "reset-not-a-number",
+        "retry-after-as-a-date",
+    ],
+)
+def test_limit_headers_that_do_not_read_are_treated_as_absent(tmp_path, nowhere, headers) -> None:
+    time = FakeTime()
+    brave = brave_answers(headers)
+    with brave_client(tmp_path, brave, nowhere, time=time) as client:
+        response = search(client)
+    # Still the provider's 429, never a 500 ...
+    assert response.status_code == 429
+    problem = response.json()
+    # ... no quota claimed, since nothing readable says the month is used up ...
+    assert problem["code"] == "rate_limited"
+    assert "rate or monthly limit" in problem["detail"]
+    # ... and with no wait read, the one retry waits one interval.
+    assert len(brave.seen) == 2 and time.slept == [1.0]
+
+
+def test_a_turn_that_comes_after_the_timeout_is_not_taken(tmp_path, brave, nowhere) -> None:
+    time = FakeTime()
+    with brave_client(
+        tmp_path, brave, nowhere, time=time, searchIntervalSeconds=10, timeoutSeconds=5
+    ) as client:
+        assert search(client).status_code == 200
+        response = search(client)
+    assert response.status_code == 429 and response.json()["code"] == "rate_limited"
+    assert "10s between searches" in response.json()["detail"]
+    assert response.headers["Retry-After"] == "10"
+    assert len(brave.seen) == 1 and time.slept == []
+
+
+def test_a_brave_refusal_is_read_by_window() -> None:
+    def read(**headers: str) -> SearchFailure:
+        return _brave_limited(httpx.Response(429, headers=headers))
+
+    too_soon = read(**{"X-RateLimit-Remaining": "0, 9", "X-RateLimit-Reset": "1, 99"})
+    assert too_soon.worth_a_retry and too_soon.retry_after == 1
+    # The longer of the two waits Brave gives.
+    both = read(**{"Retry-After": "4", "X-RateLimit-Reset": "2, 99"})
+    assert both.retry_after == 4 and both.worth_a_retry
+    quota = read(**{"X-RateLimit-Remaining": "5, 0", "X-RateLimit-Reset": "1, 7200"})
+    assert not quota.worth_a_retry and quota.retry_after == 7200
+    assert "resets in about 2 hours" in quota.detail
 
 
 # --- not set up ------------------------------------------------------------

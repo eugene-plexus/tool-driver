@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import dataclasses
 import logging
 import time
 from dataclasses import dataclass
@@ -21,8 +22,9 @@ import httpx
 from ._generated.models import WebSearchRequest, WebSearchResponse, WebSearchResult
 from ._http import egress_client, internal_client, is_internal
 from .config import ConfigStore
+from .pacing import Clock, Pacer, Sleep
 from .providers import Account, Provider, Query, get_provider
-from .search import SearchFailure, keep
+from .search import Found, SearchFailure, keep
 
 log = logging.getLogger(__name__)
 
@@ -56,6 +58,7 @@ class SearchService:
         store: ConfigStore,
         *,
         transports: tuple[httpx.AsyncBaseTransport, httpx.AsyncBaseTransport] | None = None,
+        timing: tuple[Clock, Sleep] | None = None,
     ) -> None:
         self.store = store
         # Two clients for the life of the process, never one per search
@@ -69,6 +72,9 @@ class SearchService:
         self._egress = egress_client(
             timeout=httpx.Timeout(30.0, connect=10.0), transport=egress_transport
         )
+        # `timing` (clock, sleep) is the test seam for waits measured in seconds.
+        self._clock, self._sleep = timing or (time.perf_counter, asyncio.sleep)
+        self._pacer = Pacer(self._clock, self._sleep)
         self.last: Outcome | None = None
         self._probe_task: asyncio.Task[None] | None = None
 
@@ -120,9 +126,11 @@ class SearchService:
             language=str(values["language"]) if values.get("language") else None,
             timeout=float(values.get("timeoutSeconds") or 15),
         )
+        configured = values.get("searchIntervalSeconds")
+        interval = provider.search_interval if configured is None else float(configured)
         client = self._internal if is_internal(account.base_url) else self._egress
         try:
-            found = await provider.search(client, account, query)
+            found = await self._paced(provider, client, account, query, interval)
         except SearchFailure as failure:
             self.last = Outcome(False, time.time(), failure.detail, failure.code)
             raise
@@ -140,6 +148,54 @@ class SearchService:
             latencyMs=round((time.perf_counter() - started) * 1000, 1),
             ignored=found.ignored or None,
         )
+
+    async def _paced(
+        self,
+        provider: Provider,
+        client: httpx.AsyncClient,
+        account: Account,
+        query: Query,
+        interval: float,
+    ) -> Found:
+        """The provider's search in this account's turn, retried once when
+        the provider says a short wait will do (tool-driver#3).
+
+        The whole search -- its turn, the gap before it, the request and
+        the one retry -- lives inside `timeoutSeconds`, because that is how
+        long the model waits on it. The retry waits at least `interval`
+        too, so it never lands closer to the refusal than any search would.
+        """
+        deadline = self._clock() + query.timeout
+        async with self._pacer.turn(interval, deadline):
+            sent = self._clock()
+            try:
+                return await provider.search(client, account, self._with_time_left(query, deadline))
+            except SearchFailure as failure:
+                if not failure.worth_a_retry:
+                    raise
+                wait = max(failure.retry_after or 0.0, interval)
+                # Room for the retry's own answer, as long as the refusal took.
+                took = self._clock() - sent
+                if self._clock() + wait + took >= deadline:
+                    raise
+                log.info(
+                    "%s refused a search as too soon; trying once more in %gs",
+                    provider.label,
+                    wait,
+                )
+                await self._sleep(wait)
+            try:
+                return await provider.search(client, account, self._with_time_left(query, deadline))
+            except SearchFailure as again:
+                # Whatever the second answer was -- refused again, the month
+                # now used up, no answer in the time left -- it was the second.
+                again.detail = (
+                    f"{again.detail.rstrip('.')}. It was tried once more after {wait:g}s."
+                )
+                raise
+
+    def _with_time_left(self, query: Query, deadline: float) -> Query:
+        return dataclasses.replace(query, timeout=deadline - self._clock())
 
     # -- health ------------------------------------------------------------
 
