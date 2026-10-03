@@ -210,10 +210,8 @@ def _unset_facts(key: str, values: dict[str, Any]) -> dict[str, Any]:
         found = PROVIDERS.get(provider)
         interval = found.search_interval if found is not None else 0.0
         if found is not None and interval > 0:
-            means = (
-                f"Not set: {interval:g}s between searches, the pace {found.label} documents "
-                "for its free plan. A paid plan allows more; set a shorter wait for one."
-            )
+            reason = found.search_interval_reason
+            means = f"Not set: {interval:g}s between searches" + (f", {reason}" if reason else ".")
         else:
             means = "Not set: searches are sent as they come, with no wait between them."
         return {"unsetMeans": means, "unsetResolvesTo": interval}

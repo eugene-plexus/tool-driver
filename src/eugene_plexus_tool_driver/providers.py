@@ -73,6 +73,9 @@ class Provider:
     #: Seconds from one answer to the next search when the operator sets
     #: none (`searchIntervalSeconds`); 0 sends searches as they come.
     search_interval: float = 0.0
+    #: Whose pace `search_interval` is, finishing the settings page's
+    #: "Not set: 1s between searches, ..." (settings never lie).
+    search_interval_reason: str = ""
 
     def missing(self, account: Account) -> str | None:
         """What the account still needs before it can search, or None."""
@@ -312,12 +315,21 @@ def _brave_limited(response: httpx.Response) -> SearchFailure:
     * A window after the first with nothing left is the monthly quota,
       used up. No wait inside a search ends it, so it is not retried, and
       the person reads "quota", not "too fast".
+    * Except a window `X-RateLimit-Limit` gives no allocation at all.
+      Brave stopped issuing free keys on 2026-02-12, and a prepaid key
+      since reports `X-RateLimit-Limit: 50, 0` / `X-RateLimit-Remaining:
+      49, 0`: a month with a limit of 0 always reads 0 left, so read as a
+      quota it would turn every too-fast refusal into "used up, resets in
+      about 29 days", never retried. Taken from a third party's header
+      capture (nicobailon/pi-web-access#501), not measured here.
     * Anything else is too fast, and worth one retry after the first
       window's reset or the `Retry-After`, whichever is longer.
     * A header that is missing, or does not read as a number for every
       window, is treated as absent. With no `Remaining`, nothing says the
       month is used up; with no wait at all, the retry waits one pacing
-      interval (`SearchService._paced`).
+      interval (`SearchService._paced`). With no `Limit` that pairs with
+      `Remaining`, every window is read as allocated, as before Brave sent
+      one (a legacy free key's `1, 2000` reads the same either way).
     """
     remaining = _per_window(response, "x-ratelimit-remaining")
     reset = _per_window(response, "x-ratelimit-reset")
@@ -325,8 +337,15 @@ def _brave_limited(response: httpx.Response) -> SearchFailure:
         # Two headers that disagree on how many windows there are cannot
         # be paired, so neither is believed.
         remaining = reset = None
+    limit = _per_window(response, "x-ratelimit-limit")
+    unallocated = (
+        {i for i, allowed in enumerate(limit) if allowed == 0}
+        if limit is not None and remaining is not None and len(limit) == len(remaining)
+        else set()
+    )
     retry_after = _retry_after(response)
     used_up = [i for i, left in enumerate(remaining or []) if i > 0 and left == 0]
+    used_up = [i for i in used_up if i not in unallocated]
     if used_up:
         resets_in = max(reset[i] for i in used_up) if reset is not None else retry_after
         when = f"; it resets in {_in_words(resets_in)}" if resets_in is not None else ""
@@ -398,10 +417,18 @@ PROVIDERS: dict[str, Provider] = {
         needs_key=True,
         probes=False,
         search=search_brave,
-        # Brave's documentation gives its free plan one request a second.
-        # Not measured: there is no Brave key on the development box. A
-        # paid plan allows more, and its owner can set the gap lower.
+        # One search a second is what a Brave free key allows; a free key
+        # met it live on 2026-10-01 (tool-driver#3). Brave stopped issuing
+        # free keys on 2026-02-12, but keys issued before still search, so
+        # their pace stays the default: it is the one every key accepts. A
+        # prepaid key reports 50 a second (a third party's header capture,
+        # nicobailon/pi-web-access#501; there is no Brave key on the
+        # development box), and its owner can set the gap lower.
         search_interval=1.0,
+        search_interval_reason=(
+            "the pace a Brave free key allows. Brave stopped issuing free keys on "
+            "2026-02-12, and a prepaid key allows more: set a shorter wait, or 0, for one."
+        ),
     ),
 }
 

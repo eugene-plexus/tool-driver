@@ -50,6 +50,13 @@ def test_an_unset_search_interval_says_the_providers_own_pace(tmp_path: Path) ->
     store.apply_patch(ConfigUpdateRequest.model_validate({"provider": "brave"}))
     brave = interval()
     assert brave.unsetResolvesTo == 1 and "1s between searches" in brave.unsetMeans
+    # Whose pace it is, in words that are true for a key someone can still
+    # get: Brave stopped issuing free keys on 2026-02-12, and a prepaid key
+    # allows more than one search a second. "The pace Brave documents for
+    # its free plan" described a plan a new user cannot sign up for.
+    assert "free plan" not in brave.unsetMeans
+    assert "free key" in brave.unsetMeans and "2026-02-12" in brave.unsetMeans
+    assert "prepaid key allows more" in brave.unsetMeans
     # 0 is a choice, shown as one, not as unset.
     store.apply_patch(ConfigUpdateRequest.model_validate({"searchIntervalSeconds": 0}))
     assert store.get("searchIntervalSeconds") == 0 and interval().unsetMeans is None

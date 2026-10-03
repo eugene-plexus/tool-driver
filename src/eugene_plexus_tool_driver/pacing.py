@@ -1,8 +1,10 @@
 """One account's searches, spaced so its provider does not refuse them.
 
-Brave's free plan allows one search a second, and the gateway sends a
+A Brave free key allows one search a second, and the gateway sends a
 turn's searches one after another with no gap (tool-driver#3), so the
-second reached Brave inside the same second and was refused. The gap is
+second reached Brave inside the same second and was refused. (Brave
+stopped issuing free keys on 2026-02-12; a key issued before still
+searches at that pace, and a prepaid key allows more.) The gap is
 kept here rather than in the gateway's loop because every search on an
 account passes through this process, two chats' searches included.
 """

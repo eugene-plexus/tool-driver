@@ -554,8 +554,43 @@ def test_a_second_refusal_comes_back_as_a_429_with_its_wait(tmp_path, nowhere) -
         ({"X-RateLimit-Remaining": "1, 0", "X-RateLimit-Reset": f"1, {MONTH}"}, MONTH),
         ({"X-RateLimit-Remaining": "0, 0", "X-RateLimit-Reset": f"1, {MONTH}"}, MONTH),
         ({"X-RateLimit-Remaining": "1, 0"}, None),
+        # A legacy free key's own limits (1 a second, 2,000 a month) say
+        # the month has an allocation, so 0 left in it is used up.
+        (
+            {
+                "X-RateLimit-Limit": "1, 2000",
+                "X-RateLimit-Remaining": "1, 0",
+                "X-RateLimit-Reset": f"1, {MONTH}",
+            },
+            MONTH,
+        ),
+        # A limit header that cannot be paired with `Remaining`, or does not
+        # read, is not believed, and the reading without it stands.
+        (
+            {
+                "X-RateLimit-Limit": "50, 0, 0",
+                "X-RateLimit-Remaining": "1, 0",
+                "X-RateLimit-Reset": f"1, {MONTH}",
+            },
+            MONTH,
+        ),
+        (
+            {
+                "X-RateLimit-Limit": "50, none",
+                "X-RateLimit-Remaining": "1, 0",
+                "X-RateLimit-Reset": f"1, {MONTH}",
+            },
+            MONTH,
+        ),
     ],
-    ids=["month-used-up", "second-and-month-used-up", "no-reset-given"],
+    ids=[
+        "month-used-up",
+        "second-and-month-used-up",
+        "no-reset-given",
+        "legacy-free-key-with-its-limits",
+        "limit-windows-disagree",
+        "limit-not-a-number",
+    ],
 )
 def test_a_used_up_month_says_quota_and_is_not_retried(tmp_path, nowhere, headers, resets) -> None:
     time = FakeTime()
@@ -660,6 +695,51 @@ def test_a_brave_refusal_is_read_by_window() -> None:
     quota = read(**{"X-RateLimit-Remaining": "5, 0", "X-RateLimit-Reset": "1, 7200"})
     assert not quota.worth_a_retry and quota.retry_after == 7200
     assert "resets in about 2 hours" in quota.detail
+    # A window Brave allocates nothing to is not one that ran out.
+    prepaid = read(**PREPAID)
+    assert prepaid.code == "rate_limited" and prepaid.worth_a_retry
+    assert prepaid.retry_after == 1
+
+
+# Brave stopped issuing free keys on 2026-02-12. A prepaid key reports a
+# second window with no allocation at all, which always reads 0 left:
+# `X-RateLimit-Limit: 50, 0` / `X-RateLimit-Remaining: 49, 0`, its month
+# resetting in about 29 days. From a third party's header capture
+# (nicobailon/pi-web-access#501, fixed in #503), not measured here: there
+# is no Brave key on the development box.
+PREPAID = {
+    "X-RateLimit-Limit": "50, 0",
+    "X-RateLimit-Remaining": "0, 0",
+    "X-RateLimit-Reset": "1, 2523327",
+}
+
+
+def test_a_prepaid_keys_empty_month_is_not_a_used_up_quota(tmp_path, nowhere) -> None:
+    time = FakeTime()
+    brave = brave_answers(PREPAID, None)
+    with brave_client(tmp_path, brave, nowhere, time=time) as client:
+        response = search(client)
+        health = client.get("/healthz").json()
+    # Too soon, so tried once more after the second's reset, and answered.
+    assert response.status_code == 200, response.text
+    assert response.json()["results"]
+    assert health["details"]["lastSearchOk"] is True
+    assert len(brave.seen) == 2 and time.slept == [1.0]
+
+
+def test_a_prepaid_key_refused_twice_is_told_too_fast_not_quota(tmp_path, nowhere) -> None:
+    time = FakeTime()
+    brave = brave_answers(PREPAID)
+    with brave_client(tmp_path, brave, nowhere, time=time) as client:
+        response = search(client)
+        health = client.get("/healthz").json()
+    assert response.status_code == 429 and response.headers["Retry-After"] == "1"
+    problem = response.json()
+    assert problem["code"] == "rate_limited"
+    assert "faster than its plan allows" in problem["detail"]
+    assert "quota" not in problem["detail"] and "days" not in problem["detail"]
+    assert health["details"]["code"] == "rate_limited"
+    assert len(brave.seen) == 2 and time.slept == [1.0]
 
 
 # --- not set up ------------------------------------------------------------
