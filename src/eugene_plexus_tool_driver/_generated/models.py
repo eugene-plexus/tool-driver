@@ -211,7 +211,8 @@ class ReasoningEffort(StrEnum):
     `reasoning_effort` (P2c, 2026-09-28). Measured on
     `openai/gpt-oss-20b` through OpenRouter: 17 reasoning tokens at
     `low`, 275 at `high`. A setting, so it routes only to a model
-    that lists it (A2).
+    that lists it (A2). `max` was added 2026-10-03: GPT-6 and
+    OpenRouter accept it, and a caller sending it was refused here.
 
     """
 
@@ -221,6 +222,7 @@ class ReasoningEffort(StrEnum):
     medium = 'medium'
     high = 'high'
     xhigh = 'xhigh'
+    max = 'max'
 
 
 class Verbosity(StrEnum):
@@ -418,6 +420,11 @@ class EngineKind(StrEnum):
     and without an adapter there is nothing that knows how to start
     it or tell when it is ready.
 
+    `strata` is experimental. It launches Strata's Python HTTP
+    server and native engine together, using a prepared Strata JSON
+    configuration as `RuntimeSpec.modelPath`. It does not accept an
+    arbitrary GGUF or prepare model weights automatically.
+
     `kev` drives upstream `python -m kev.serve` and loads Kev
     decision checkpoints (`kev_checkpoint` format) — a decision
     model, not a chat model: its server speaks the System One
@@ -469,6 +476,7 @@ class EngineKind(StrEnum):
     vllm = 'vllm'
     mlx = 'mlx'
     kev = 'kev'
+    strata = 'strata'
 
 
 class ModelFormat(StrEnum):
@@ -945,12 +953,18 @@ class TrustGrant(StrEnum):
     * `gateway`: given to a node by the operator's join token, never
       claimed by the node. Service tokens with `sub: gateway` to
       other machines and to `control`.
+    * `files`: a Job Site's token key, **instead of** `node`, never
+      beside it (`docs/design/remote-nodes.md` §3.2). Service tokens
+      with `sub: agent` to `control`, and to **its own machine**.
+      Nothing else: a site that joined with a leaked token reaches no
+      other machine and no other component, on any network.
 
     """
 
     authority = 'authority'
     node = 'node'
     gateway = 'gateway'
+    files = 'files'
 
 
 class TrustKey(BaseModel):
