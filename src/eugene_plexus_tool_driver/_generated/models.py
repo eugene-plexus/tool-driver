@@ -322,6 +322,11 @@ class BackendKind(StrEnum):
     /v1/speak` to its text-to-speech route and `POST /v1/transcribe` to
     its speech-to-text route.
 
+    `gemini_api` is Google's own Gemini API (`generateContent`, keyed by
+    `x-goog-api-key`; `docs/design/gemini-provider.md`, G1): chat,
+    embeddings, images, Veo video, speech and transcription, translated
+    both ways, with each model's capabilities from Google's own listing.
+
     """
 
     anthropic_api = 'anthropic_api'
@@ -331,6 +336,7 @@ class BackendKind(StrEnum):
     openai_compat_http = 'openai_compat_http'
     systemone_http = 'systemone_http'
     elevenlabs_http = 'elevenlabs_http'
+    gemini_api = 'gemini_api'
 
 
 class ComponentKind(StrEnum):
@@ -1294,7 +1300,9 @@ class WebSearchResult(BaseModel):
 
 
 class ToolDriverInfo(BaseModel):
-    provider: str = Field(..., description='The provider key, `searxng` or `brave`.')
+    provider: str = Field(
+        ..., description='The provider key, `searxng`, `brave` or `google`.'
+    )
     label: str | None = Field(None, description="The provider's display name.")
     tools: list[ToolName] = Field(
         ..., description='The tools this process runs. Empty until it is configured.'
@@ -1483,6 +1491,10 @@ class WebSearchResponse(BaseModel):
     latencyMs: float | None = None
     ignored: list[str] | None = Field(
         None, description='Request settings this provider could not honour, by name.'
+    )
+    searchSuggestions: str | None = Field(
+        None,
+        description="HTML the provider's terms require shown with these results, to\nthe person who asked, unmodified: Google's Search Suggestions\n(`searchEntryPoint.renderedContent`), for the `google` provider\n(docs/design/google-search-account.md, GS1, GS4). Null or absent\nfor providers with none. The gateway carries it to the caller\nand keeps none of it.\n",
     )
 
 

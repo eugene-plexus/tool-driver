@@ -3,8 +3,9 @@
 A provider owns its own wire protocol and its quirks; the gateway sees
 `WebSearchResponse` and nothing else. Two providers today, chosen by
 design call #4 (`server-run-tools.md` §9): **SearXNG**, self-hosted and
-keyless, and **Brave**, the first keyed one. Both were read against the
-real thing where this box could reach it:
+keyless, **Brave**, the first keyed one, and **Google** (a Gemini key; the
+model runs the search). Each was read against the real thing where this box
+could reach it:
 
 * SearXNG, measured 2026-09-29 against an instance started from
   `searxng/searxng@4e2c1ea` in WSL2 with `search.formats: [html, json]`:
@@ -22,6 +23,10 @@ real thing where this box could reach it:
   `title`, `url`, `description`, `age`, `page_age`, `extra_snippets`;
   401 for a bad key, 422 for bad parameters, 429 when rate limited, with
   the limits in `X-RateLimit-*` headers (`providers._brave_limited`).
+* Google, measured 2026-10-09 with a Gemini key: `generateContent` with the
+  `googleSearch` tool answers text plus `groundingMetadata`
+  (`groundingChunks`, `groundingSupports`, `searchEntryPoint`); see
+  `providers.search_google` and `docs/design/google-search-account.md`.
 
 **Filtering is ours, always.** A provider may be told about allowed
 domains (a `site:` operator when there is exactly one), but what comes
@@ -84,6 +89,9 @@ class Found:
     hits: list[Hit]
     answer: str | None = None
     ignored: list[str] = field(default_factory=list)
+    #: HTML the provider's terms require shown with the results (Google's
+    #: Search Suggestions), verbatim; None for providers with none.
+    search_suggestions: str | None = None
 
 
 def plain(text: Any) -> str:

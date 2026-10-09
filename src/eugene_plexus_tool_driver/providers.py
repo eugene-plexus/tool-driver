@@ -1,4 +1,4 @@
-"""The search providers: SearXNG (free, self-hosted) and Brave (keyed).
+"""The search providers: SearXNG (free, self-hosted), Brave (keyed) and Google (a Gemini key).
 
 Design call #4 (`server-run-tools.md` §9). Each provider turns the one
 `WebSearchRequest` into its own wire request and its answer back into
@@ -12,19 +12,25 @@ that sentence is what the model is handed and then what a person reads.
 
 from __future__ import annotations
 
+import asyncio
+import hashlib
 import logging
 import math
+import re
+import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any
+from urllib.parse import urlsplit
 
 import httpx
 
-from .search import Found, Hit, SearchFailure, plain, trim, with_site
+from .search import Found, Hit, SearchFailure, host_of, keep, plain, trim, with_site
 
 log = logging.getLogger(__name__)
 
 BRAVE_URL = "https://api.search.brave.com"
+GOOGLE_URL = "https://generativelanguage.googleapis.com/v1beta"
 
 _SAFE_SEARXNG = {"off": "0", "moderate": "1", "strict": "2"}
 
@@ -43,6 +49,9 @@ class Query:
     language: str | None
     #: Seconds this request may take: what is left of the search's timeout.
     timeout: float
+    #: The request carried a `userLocation` (of any kind), whether or not it
+    #: named a country; a provider that cannot use one names it as ignored.
+    located: bool = False
 
 
 @dataclass(frozen=True)
@@ -51,6 +60,9 @@ class Account:
 
     base_url: str
     api_key: str | None
+    #: `searchModel`: the Gemini model that runs a Google search. None lets
+    #: the provider choose from the key's own listing.
+    search_model: str | None = None
 
 
 SearchFn = Callable[[httpx.AsyncClient, Account, Query], Awaitable[Found]]
@@ -400,6 +412,361 @@ def _in_words(seconds: float) -> str:
     return f"{count} second{'' if count == 1 else 's'}"
 
 
+# --- Google (Grounding with Google Search, through a Gemini key) ------------
+
+#: How long a model chosen from a key's listing is trusted.
+MODEL_PICK_SECONDS = 3600.0
+#: The longest one redirect lookup may take.
+REDIRECT_SECONDS = 3.0
+#: The only host whose links are asked for a `Location`: Google's own
+#: redirect for a grounding source. Any other address in an answer is kept
+#: as it is, so no page is ever fetched.
+_REDIRECT_HOST = "vertexaisearch.cloud.google.com"
+_PREFERRED_MODELS = ("gemini-3.5-flash-lite", "gemini-3.1-flash-lite")
+_FLASH_LITE = re.compile(r"^gemini-(\d+(?:\.\d+)*)-flash-lite$")
+_FLASH = re.compile(r"^gemini-(\d+(?:\.\d+)*)-flash$")
+
+#: (sha256 of the key, base address) -> (model, perf_counter() it expires at).
+_PICKS: dict[tuple[str, str], tuple[str, float]] = {}
+
+
+def _pick_key(api_key: str, base: str) -> tuple[str, str]:
+    return hashlib.sha256(api_key.encode()).hexdigest(), base.rstrip("/")
+
+
+def known_model(api_key: str | None, base_url: str | None) -> str | None:
+    """The model an unset `searchModel` is using now, if one was chosen
+    within the hour: what the settings page says is in effect."""
+    if not api_key:
+        return None
+    entry = _PICKS.get(_pick_key(api_key, base_url or GOOGLE_URL))
+    if entry is None or entry[1] <= time.perf_counter():
+        return None
+    return entry[0]
+
+
+def forget_models() -> None:
+    _PICKS.clear()
+
+
+def choose_model(ids: list[str]) -> str | None:
+    """The cheapest grounding model among `ids`: our two named flash-lites,
+    else the newest flash-lite, else the newest flash."""
+    for wanted in _PREFERRED_MODELS:
+        if wanted in ids:
+            return wanted
+    for pattern in (_FLASH_LITE, _FLASH):
+        found = [(i, m.group(1)) for i in ids if (m := pattern.match(i))]
+        if found:
+            return max(found, key=lambda pair: tuple(int(p) for p in pair[1].split(".")))[0]
+    return None
+
+
+def _scrub(text: str, key: str | None) -> str:
+    """`text` with the key gone: Google can echo request details in an error."""
+    return text.replace(key, "[key]") if key else text
+
+
+def _time_left(seconds: float, started: float) -> float:
+    """What is left of the search's time, or the timeout it has become."""
+    left = seconds - (time.perf_counter() - started)
+    if left <= 0:
+        raise SearchFailure(504, "timeout", f"Google did not answer within {round(seconds, 1):g}s")
+    return left
+
+
+async def _post(
+    client: httpx.AsyncClient,
+    who: str,
+    url: str,
+    *,
+    json: dict[str, Any],
+    headers: dict[str, str],
+    seconds: float,
+) -> httpx.Response:
+    try:
+        return await client.post(url, json=json, headers=headers, timeout=seconds)
+    except httpx.TimeoutException:
+        raise SearchFailure(
+            504, "timeout", f"{who} did not answer within {round(seconds, 1):g}s"
+        ) from None
+    except httpx.HTTPError as exc:
+        raise SearchFailure(
+            502, "unreachable", f"{who} could not be reached at {url} ({type(exc).__name__})"
+        ) from None
+
+
+def _google_error(response: httpx.Response) -> tuple[str, float | None]:
+    """Google's `error.message`, and the wait its `RetryInfo` gives."""
+    try:
+        body = response.json()
+    except ValueError:
+        return response.text[:300], None
+    error = body.get("error") if isinstance(body, dict) else None
+    if not isinstance(error, dict):
+        return str(body)[:300], None
+    delay: float | None = None
+    for detail in error.get("details") or []:
+        if isinstance(detail, dict) and str(detail.get("@type", "")).endswith("RetryInfo"):
+            raw = str(detail.get("retryDelay") or "").strip().removesuffix("s")
+            try:
+                delay = max(0.0, float(raw))
+            except ValueError:
+                delay = None
+    return str(error.get("message") or error.get("status") or "")[:300], delay
+
+
+def _google_failure(response: httpx.Response, key: str | None, model: str | None) -> SearchFailure:
+    """Google's refusal as the sentence a person and a model are handed."""
+    status = response.status_code
+    message, delay = _google_error(response)
+    message = _scrub(message, key)
+    if "location is not supported" in message.lower():
+        return SearchFailure(
+            502,
+            "upstream_error",
+            f"Google does not serve the region this tool driver runs in (HTTP {status}: "
+            f"{message}). Run the search account on a node in a region Google supports.",
+        )
+    if status in (401, 403) or (status == 400 and "API_KEY_INVALID" in response.text):
+        return SearchFailure(
+            502,
+            "upstream_auth_error",
+            f"Google refused this account's Gemini API key (HTTP {status}). Check the key "
+            "on the search account's settings; a new one comes from Google AI Studio.",
+        )
+    if status == 429:
+        header = _retry_after(response)
+        wait = header if header is not None else delay
+        when = f"; Google says to wait {_in_words(wait)}" if wait is not None else ""
+        return SearchFailure(
+            429,
+            "rate_limited",
+            f"Google says this key's project is over its quota or searching too fast "
+            f"(HTTP 429{when}): {message}",
+            retry_after=wait,
+            worth_a_retry=wait is not None,
+        )
+    if status == 404 and model:
+        return SearchFailure(
+            502,
+            "upstream_error",
+            f"Google has no model {model!r} this key can use (HTTP 404). Set `searchModel` "
+            "on the search account to one the key lists, or clear it to let the account choose.",
+        )
+    return SearchFailure(502, "upstream_error", f"Google answered HTTP {status}: {message}")
+
+
+async def _list_model_ids(
+    client: httpx.AsyncClient,
+    base: str,
+    headers: dict[str, str],
+    key: str,
+    seconds: float,
+    started: float,
+) -> list[str]:
+    """Every generateContent model the key lists, following `nextPageToken`."""
+    ids: list[str] = []
+    token: str | None = None
+    for _ in range(20):
+        params: dict[str, Any] = {"pageSize": 1000}
+        if token:
+            params["pageToken"] = token
+        response = await _get(
+            client,
+            "Google",
+            f"{base}/models",
+            params=params,
+            headers=headers,
+            seconds=_time_left(seconds, started),
+        )
+        if response.status_code >= 400:
+            raise _google_failure(response, key, None)
+        try:
+            body = response.json()
+        except ValueError:
+            raise SearchFailure(502, "upstream_error", "Google's model list was not JSON") from None
+        if not isinstance(body, dict):
+            break
+        for entry in body.get("models") or []:
+            if not isinstance(entry, dict):
+                continue
+            name, methods = entry.get("name"), entry.get("supportedGenerationMethods")
+            if isinstance(name, str) and isinstance(methods, list) and "generateContent" in methods:
+                ids.append(name.removeprefix("models/"))
+        token = body.get("nextPageToken")
+        if not isinstance(token, str) or not token:
+            break
+    return ids
+
+
+async def _model_for(
+    client: httpx.AsyncClient,
+    account: Account,
+    base: str,
+    headers: dict[str, str],
+    seconds: float,
+    started: float,
+) -> tuple[str, bool]:
+    """The model to search with, and whether it came from the key's listing."""
+    if account.search_model:
+        return account.search_model.removeprefix("models/"), False
+    key = account.api_key or ""
+    known = known_model(key, base)
+    if known:
+        return known, True
+    chosen = choose_model(await _list_model_ids(client, base, headers, key, seconds, started))
+    if chosen is None:
+        raise SearchFailure(
+            502,
+            "upstream_error",
+            "This Gemini key lists no flash-lite or flash model that can search the web. "
+            "Set `searchModel` on the search account to a model the key can use.",
+        )
+    _PICKS[_pick_key(key, base)] = (chosen, time.perf_counter() + MODEL_PICK_SECONDS)
+    return chosen, True
+
+
+def _origin(url: str) -> tuple[str, str, int | None]:
+    parts = urlsplit(url)
+    return parts.scheme, (parts.hostname or "").lower(), parts.port
+
+
+async def _resolve(client: httpx.AsyncClient, uri: str, seconds: float, base: str) -> str:
+    """Google's redirect for a source, followed one step and no further.
+
+    Asks only for the `Location`; the page it names is never fetched. Any
+    failure keeps Google's own link, which still opens the source. Only
+    Google's redirect host is asked, or the account's own `baseUrl` origin
+    (a proxy or a fixture in front of Google): never a host an answer names.
+    """
+    if (host_of(uri) != _REDIRECT_HOST and _origin(uri) != _origin(base)) or seconds <= 0:
+        return uri
+    try:
+        response = await client.get(uri, follow_redirects=False, timeout=seconds)
+    except Exception:
+        return uri
+    if 300 <= response.status_code < 400:
+        location = str(response.headers.get("location", ""))
+        parts = urlsplit(location)
+        if parts.scheme in ("http", "https") and parts.netloc:
+            return location
+    return uri
+
+
+def _candidate_text(candidate: dict[str, Any]) -> str:
+    content = candidate.get("content")
+    parts = content.get("parts") if isinstance(content, dict) else None
+    return "".join(
+        p["text"]
+        for p in parts or []
+        if isinstance(p, dict) and isinstance(p.get("text"), str) and not p.get("thought")
+    )
+
+
+async def search_google(client: httpx.AsyncClient, account: Account, query: Query) -> Found:
+    """One `generateContent` call with the `googleSearch` tool.
+
+    Google has no plain search endpoint for a Gemini key: a model runs the
+    searches and answers from them (`google-search-account.md`). What the
+    candidate carries is passed on as Google's terms require (GS1): the
+    answer's text is never changed, and its Search Suggestions are handed
+    on untouched. Shape measured 2026-10-09 against `gemini-3.5-flash-lite`.
+    """
+    started = time.perf_counter()
+    base = (account.base_url or GOOGLE_URL).rstrip("/")
+    key = account.api_key or ""
+    headers = {"x-goog-api-key": key}
+    model, from_listing = await _model_for(client, account, base, headers, query.timeout, started)
+    instruction = f"Search the web for: {with_site(query.query, query.allowed)}. "
+    instruction += "Answer briefly from what you find."
+    if query.language:
+        instruction += f" Answer in {query.language}."
+    response = await _post(
+        client,
+        "Google",
+        f"{base}/models/{model}:generateContent",
+        json={
+            "contents": [{"role": "user", "parts": [{"text": instruction}]}],
+            "tools": [{"googleSearch": {}}],
+        },
+        headers=headers,
+        seconds=_time_left(query.timeout, started),
+    )
+    if response.status_code >= 400:
+        if response.status_code == 404 and from_listing:
+            _PICKS.pop(_pick_key(key, base), None)
+        raise _google_failure(response, key, model)
+    try:
+        body = response.json()
+    except ValueError:
+        raise SearchFailure(
+            502, "upstream_error", "Google answered something that is not JSON"
+        ) from None
+    candidates = body.get("candidates") if isinstance(body, dict) else None
+    candidate = candidates[0] if isinstance(candidates, list) and candidates else None
+    candidate = candidate if isinstance(candidate, dict) else {}
+    meta = candidate.get("groundingMetadata")
+    meta = meta if isinstance(meta, dict) else {}
+    chunks = meta.get("groundingChunks")
+    ignored = ["userLocation"] if query.located else []
+    if not isinstance(chunks, list) or not chunks:
+        # Google ran no search. Only the reason is logged, never the model's words.
+        log.debug("Google grounded nothing (finishReason=%s)", candidate.get("finishReason"))
+        return Found(hits=[], answer=None, ignored=ignored)
+
+    snippets: dict[int, list[str]] = {}
+    for support in meta.get("groundingSupports") or []:
+        segment = support.get("segment") if isinstance(support, dict) else None
+        text = segment.get("text") if isinstance(segment, dict) else None
+        if not isinstance(text, str) or not text:
+            continue
+        for index in support.get("groundingChunkIndices") or []:
+            if isinstance(index, int):
+                bucket = snippets.setdefault(index, [])
+                # Google's segments can repeat one another (a later one
+                # starting with an earlier one's text): keep the longer.
+                if any(text in kept for kept in bucket):
+                    continue
+                bucket[:] = [kept for kept in bucket if kept not in text]
+                bucket.append(text)
+
+    sources: list[tuple[str, str, str]] = []
+    for index, chunk in enumerate(chunks):
+        web = chunk.get("web") if isinstance(chunk, dict) else None
+        uri = web.get("uri") if isinstance(web, dict) else None
+        if not isinstance(web, dict) or not isinstance(uri, str) or not uri:
+            continue
+        title = web.get("title")
+        sources.append(
+            (
+                uri,
+                title if isinstance(title, str) and title else uri,
+                " ".join(snippets.get(index, [])),
+            )
+        )
+    seconds = min(REDIRECT_SECONDS, query.timeout - (time.perf_counter() - started))
+    urls = await asyncio.gather(*(_resolve(client, uri, seconds, base) for uri, _, _ in sources))
+    hits = [
+        Hit(url=url, title=title, snippet=trim(snippet, query.context_size))
+        for url, (_, title, snippet) in zip(urls, sources, strict=True)
+    ]
+    # Google's terms forbid editing what it grounded, so when the request
+    # filters domains (the answer may lean on pages the filter removes) the
+    # answer is left out rather than trimmed (GS8).
+    filtered = bool(query.allowed or query.blocked)
+    hits = keep(hits, query.allowed, query.blocked)
+    answer = None if filtered else (_candidate_text(candidate) or None)
+    entry = meta.get("searchEntryPoint")
+    rendered = entry.get("renderedContent") if isinstance(entry, dict) else None
+    return Found(
+        hits=hits,
+        answer=answer,
+        ignored=ignored,
+        search_suggestions=rendered if isinstance(rendered, str) and rendered else None,
+    )
+
+
 PROVIDERS: dict[str, Provider] = {
     "searxng": Provider(
         key="searxng",
@@ -428,6 +795,22 @@ PROVIDERS: dict[str, Provider] = {
         search_interval_reason=(
             "the pace a Brave free key allows. Brave stopped issuing free keys on "
             "2026-02-12, and a prepaid key allows more: set a shorter wait, or 0, for one."
+        ),
+    ),
+    "google": Provider(
+        key="google",
+        label="Google Search (Gemini API key)",
+        default_base_url=GOOGLE_URL,
+        needs_key=True,
+        # Every search is billed (a query the model runs costs, past the
+        # free allowance), so nothing asks one on a timer.
+        probes=False,
+        search=search_google,
+        billing="per_search",
+        search_interval=0.0,
+        search_interval_reason=(
+            "because Google limits a Gemini key by its project's quota, not by a pace "
+            "between searches."
         ),
     ),
 }

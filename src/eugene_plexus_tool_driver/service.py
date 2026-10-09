@@ -86,7 +86,12 @@ class SearchService:
         provider = get_provider(str(values.get("provider") or "searxng"))
         base_url = str(values.get("baseUrl") or provider.default_base_url or "").strip()
         api_key = values.get("apiKey")
-        account = Account(base_url=base_url, api_key=api_key if isinstance(api_key, str) else None)
+        model = values.get("searchModel")
+        account = Account(
+            base_url=base_url,
+            api_key=api_key if isinstance(api_key, str) else None,
+            search_model=model.strip() if isinstance(model, str) and model.strip() else None,
+        )
         return provider, account
 
     def configured(self) -> bool:
@@ -125,6 +130,7 @@ class SearchService:
             safe_search=str(values.get("safeSearch") or "moderate"),
             language=str(values["language"]) if values.get("language") else None,
             timeout=float(values.get("timeoutSeconds") or 15),
+            located=request.userLocation is not None,
         )
         configured = values.get("searchIntervalSeconds")
         interval = provider.search_interval if configured is None else float(configured)
@@ -147,6 +153,7 @@ class SearchService:
             provider=provider.key,
             latencyMs=round((time.perf_counter() - started) * 1000, 1),
             ignored=found.ignored or None,
+            searchSuggestions=found.search_suggestions,
         )
 
     async def _paced(

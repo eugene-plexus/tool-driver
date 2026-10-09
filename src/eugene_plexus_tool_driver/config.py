@@ -33,7 +33,7 @@ from ._generated.models import (
     ConfigUpdateResult,
     ConfigValueType,
 )
-from .providers import PROVIDERS
+from .providers import BRAVE_URL, GOOGLE_URL, PROVIDERS, known_model
 
 log = logging.getLogger(__name__)
 
@@ -60,8 +60,10 @@ def _build_fields() -> list[ConfigField]:
             description=(
                 "Who runs the searches. SearXNG is free and runs on your own "
                 "machine or server; you give it the address. Brave Search is a "
-                "paid service with its own index; you give it a key. Either way "
-                "the words searched for go to the internet."
+                "paid service with its own index; you give it a key. Google Search "
+                "asks Google through a Gemini API key, and every search is billed "
+                "past Google's free allowance. Whichever you pick, the words "
+                "searched for go to the internet."
             ),
             category="account",
             valueType=ConfigValueType.enum,
@@ -77,7 +79,7 @@ def _build_fields() -> list[ConfigField]:
                 "SearXNG: the address of your instance, such as "
                 "http://192.168.1.20:8888. Its settings must allow JSON output "
                 "(`search.formats` includes `json`); without it every search is "
-                "refused. Brave: leave empty to use Brave's own address."
+                "refused. Brave and Google: leave empty to use their own address."
             ),
             category="account",
             valueType=ConfigValueType.url,
@@ -86,13 +88,31 @@ def _build_fields() -> list[ConfigField]:
             key="apiKey",
             label="API key",
             description=(
-                "Your Brave Search API subscription token, from "
-                "api-dashboard.search.brave.com. Stored encrypted."
+                "Brave: your Brave Search API subscription token, from "
+                "api-dashboard.search.brave.com. Google: a Gemini API key, from "
+                "Google AI Studio (aistudio.google.com). Stored encrypted. "
+                "Google's terms for Grounding with Google Search bind the key's "
+                "owner: results are shown unmodified, with Google's Search "
+                "Suggestions, to the person who asked. Workbench shows them; other "
+                "apps may not."
             ),
             category="account",
             valueType=ConfigValueType.secret,
             sensitive=True,
-            showWhen=_only_for("brave"),
+            showWhen=_only_for("brave", "google"),
+        ),
+        ConfigField(
+            key="searchModel",
+            label="Searching model",
+            description=(
+                "The Gemini model that runs each Google search. Leave empty to use "
+                "the cheapest one your key can use (a flash-lite, from Google's "
+                "own list for the key). Google bills the model's tokens too."
+            ),
+            category="account",
+            valueType=ConfigValueType.string,
+            pattern=r"^(models/)?[A-Za-z0-9._-]+$",
+            showWhen=_only_for("google"),
         ),
         ConfigField(
             key="maxResults",
@@ -116,6 +136,8 @@ def _build_fields() -> list[ConfigField]:
             default="moderate",
             enumValues=["off", "moderate", "strict"],
             enumLabels=["Off", "Moderate", "Strict"],
+            # Google's search has no such setting, so it is not offered there.
+            showWhen=_only_for("searxng", "brave"),
         ),
         ConfigField(
             key="language",
@@ -195,11 +217,14 @@ def _unset_facts(key: str, values: dict[str, Any]) -> dict[str, Any]:
     provider = str(values.get("provider") or "searxng")
     if key == "baseUrl":
         if provider == "brave":
-            from .providers import BRAVE_URL
-
             return {
                 "unsetMeans": f"Not set: uses Brave's own address, {BRAVE_URL}.",
                 "unsetResolvesTo": BRAVE_URL,
+            }
+        if provider == "google":
+            return {
+                "unsetMeans": f"Not set: uses Google's own address, {GOOGLE_URL}.",
+                "unsetResolvesTo": GOOGLE_URL,
             }
         return {
             "unsetMeans": "Not set: a SearXNG account needs its address, so it searches nothing."
@@ -213,10 +238,29 @@ def _unset_facts(key: str, values: dict[str, Any]) -> dict[str, Any]:
             reason = found.search_interval_reason
             means = f"Not set: {interval:g}s between searches" + (f", {reason}" if reason else ".")
         else:
-            means = "Not set: searches are sent as they come, with no wait between them."
+            means = "Not set: searches are sent as they come, with no wait between them"
+            reason = found.search_interval_reason if found is not None else ""
+            means += f", {reason}" if reason else "."
         return {"unsetMeans": means, "unsetResolvesTo": interval}
     if key == "apiKey":
+        if provider == "google":
+            return {"unsetMeans": "Not set: Google refuses a search without a Gemini API key."}
         return {"unsetMeans": "Not set: Brave refuses a search without a key."}
+    if key == "searchModel":
+        model = known_model(
+            values.get("apiKey") if isinstance(values.get("apiKey"), str) else None,
+            str(values.get("baseUrl") or "") or None,
+        )
+        if model:
+            return {
+                "unsetMeans": f"Not set: searches with {model}, the cheapest grounding model "
+                "this key's listing has.",
+                "unsetResolvesTo": model,
+            }
+        return {
+            "unsetMeans": "Not set: the model is chosen from the key's own listing at the "
+            "first search, the cheapest flash-lite it has (else a flash)."
+        }
     return {}
 
 

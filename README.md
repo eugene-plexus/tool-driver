@@ -20,6 +20,10 @@ An install runs **zero or more instances, one per search account**:
   instance must allow JSON output: add `json` to `search.formats` in its
   `settings.yml` (it answers `403` otherwise, and this component says so).
 - **Brave Search** — a paid service with its own index. Give it your API key.
+- **Google Search (Gemini API key)** — Google's search, reached through a
+  Gemini model (Grounding with Google Search). Give it a Gemini key from
+  Google AI Studio. Billed per search; Google's terms require its answer and
+  Search Suggestions to be shown unmodified to the person who asked.
 
 Either way the words searched for leave your machine: a SearXNG on your LAN
 forwards them to public engines. That is why a client key marked local-only
