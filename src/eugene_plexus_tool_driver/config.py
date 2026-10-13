@@ -58,12 +58,14 @@ def _build_fields() -> list[ConfigField]:
             key="provider",
             label="Search provider",
             description=(
-                "Who runs the searches. SearXNG is free and runs on your own "
-                "machine or server; you give it the address. Brave Search is a "
-                "paid service with its own index; you give it a key. Google Search "
-                "asks Google through a Gemini API key, and every search is billed "
-                "past Google's free allowance. Whichever you pick, the words "
-                "searched for go to the internet."
+                "Which service runs this account's web searches.\n\n"
+                "- **SearXNG** is free and runs on your own machine or server; you "
+                "give it the address.\n"
+                "- **Brave Search** is a paid service with its own index; you give "
+                "it a key.\n"
+                "- **Google Search** asks Google through a Gemini API key, and "
+                "every search is billed past Google's free allowance.\n\n"
+                "Whichever you pick, the words searched for go to the internet."
             ),
             category="account",
             valueType=ConfigValueType.enum,
@@ -154,9 +156,9 @@ def _build_fields() -> list[ConfigField]:
             key="timeoutSeconds",
             label="Search timeout",
             description=(
-                "How long one search may take before it is reported to the model "
-                "as failed, waiting its turn and one retry included. A model waits "
-                "on this, so it is short."
+                "How long one search may take before the model is told it failed.\n\n"
+                "That includes waiting its turn and one retry. A model waits on this, "
+                "so keep it short."
             ),
             category="network",
             valueType=ConfigValueType.duration,
@@ -182,10 +184,10 @@ def _build_fields() -> list[ConfigField]:
             key="probeMinutes",
             label="Check every (minutes)",
             description=(
-                "How often a free SearXNG instance is asked one search so its "
-                "health is known before a model needs it. 0 turns the check off. "
-                "A paid provider is never checked on a timer, because every "
-                "check would be a search you pay for."
+                "How often a free SearXNG instance is asked one search to check "
+                "its health.\n\n"
+                "0 turns the check off. A paid provider is never checked on a timer, "
+                "because every check would be a search you pay for."
             ),
             category="network",
             valueType=ConfigValueType.integer,
