@@ -23,7 +23,7 @@ from ._generated.models import WebSearchRequest, WebSearchResponse, WebSearchRes
 from ._http import egress_client, internal_client, is_internal
 from .config import ConfigStore
 from .pacing import Clock, Pacer, Sleep
-from .providers import Account, Provider, Query, get_provider
+from .providers import Account, Provider, Query, get_provider, place_words
 from .search import Found, SearchFailure, keep
 
 log = logging.getLogger(__name__)
@@ -131,6 +131,9 @@ class SearchService:
             language=str(values["language"]) if values.get("language") else None,
             timeout=float(values.get("timeoutSeconds") or 15),
             located=request.userLocation is not None,
+            place=place_words(location.city, location.region, location.country)
+            if location is not None
+            else None,
         )
         configured = values.get("searchIntervalSeconds")
         interval = provider.search_interval if configured is None else float(configured)

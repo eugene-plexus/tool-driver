@@ -52,6 +52,9 @@ class Query:
     #: The request carried a `userLocation` (of any kind), whether or not it
     #: named a country; a provider that cannot use one names it as ignored.
     located: bool = False
+    #: The approximate location in words ("Austin, Texas, US"), for a provider that
+    #: can only be told it (Google, GS9's later slice), or None.
+    place: str | None = None
 
 
 @dataclass(frozen=True)
@@ -66,6 +69,24 @@ class Account:
 
 
 SearchFn = Callable[[httpx.AsyncClient, Account, Query], Awaitable[Found]]
+
+#: What one part of a place may hold, at most, and of what: words, not instructions.
+PLACE_PART_CHARS = 60
+_PLACE_PART = re.compile(r"[^\w .,'-]+")
+
+
+def place_words(city: str | None, region: str | None, country: str | None) -> str | None:
+    """An approximate location as words ("Austin, Texas, US"), from what a request named:
+    each part only letters, digits, spaces and a little punctuation, and short. None when
+    nothing is left."""
+    parts: list[str] = []
+    for part in (city, region, country):
+        if not isinstance(part, str):
+            continue
+        cleaned = " ".join(_PLACE_PART.sub(" ", part).split())[:PLACE_PART_CHARS].strip(" .,-")
+        if cleaned and cleaned not in parts:
+            parts.append(cleaned)
+    return ", ".join(parts) or None
 
 
 @dataclass(frozen=True)
@@ -682,6 +703,10 @@ async def search_google(client: httpx.AsyncClient, account: Account, query: Quer
     instruction += "Answer briefly from what you find."
     if query.language:
         instruction += f" Answer in {query.language}."
+    if query.place:
+        # Gemini's search tool takes a latitude and longitude only; the person's
+        # approximate location is said in words instead (tool-driver#4).
+        instruction += f" The person searching is in {query.place}."
     response = await _post(
         client,
         "Google",
@@ -709,7 +734,7 @@ async def search_google(client: httpx.AsyncClient, account: Account, query: Quer
     meta = candidate.get("groundingMetadata")
     meta = meta if isinstance(meta, dict) else {}
     chunks = meta.get("groundingChunks")
-    ignored = ["userLocation"] if query.located else []
+    ignored = ["userLocation"] if query.located and not query.place else []
     if not isinstance(chunks, list) or not chunks:
         # Google ran no search. Only the reason is logged, never the model's words.
         log.debug("Google grounded nothing (finishReason=%s)", candidate.get("finishReason"))
