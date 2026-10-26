@@ -5,7 +5,8 @@
 [![Python 3.12](https://img.shields.io/badge/python-3.12-3776AB.svg)](https://www.python.org)
 
 Runs the tools the [Eugene Plexus](https://github.com/eugene-plexus) hub runs
-itself — **web search** today — for **one** tool provider account.
+itself — **web search**, and **remote MCP** on the Responses door — for
+**one** tool provider account.
 
 OpenAI's and Anthropic's APIs define `web_search` as a tool the *provider*
 runs. Point Codex or Claude Code at a local model and nobody runs it: Codex
@@ -24,6 +25,8 @@ An install runs **zero or more instances, one per search account**:
   Gemini model (Grounding with Google Search). Give it a Gemini key from
   Google AI Studio. Billed per search; Google's terms require its answer and
   Search Suggestions to be shown unmodified to the person who asked.
+- **Tavily** — a paid search service made for AI models. Give it your API
+  key; each search costs 1 credit (basic depth) or 2 (advanced).
 
 Either way the words searched for leave your machine: a SearXNG on your LAN
 forwards them to public engines. That is why a client key marked local-only
@@ -36,7 +39,18 @@ key) and serves `POST /v1/tools/web_search`. It does **not** run the loop
 that decides when to search, how many times, or what the model is told — that
 is the gateway's, so every door (chat completions, Responses, Anthropic
 messages) behaves the same. It never runs tools that act on your machine;
-files, shells and your own MCP servers stay in apps and clients.
+files, shells and your own local MCP servers stay in apps and clients.
+
+**Remote MCP** (`POST /v1/tools/mcp/list_tools` and `/v1/tools/mcp/call`,
+for the install's gateway only): when an API client names an MCP server on
+a Responses request, the gateway asks this process to list its tools and to
+call them. The server is reached on the internet only, over https, unless
+the owner chose *Internet and this network* in the gateway's settings; this
+machine's loopback, link-local and cloud metadata addresses are never
+reached. Every address a name resolves to is checked, and the connection
+goes to the address that was checked. The caller's headers go to that one
+server for that one call, and are never logged or kept. Limits: 30 s a
+call, 8 MiB an answer, 64 tools.
 
 The contract is [`openapi/tool-driver.yaml`](https://github.com/eugene-plexus/specs/blob/main/openapi/tool-driver.yaml)
 in `specs`; the design is

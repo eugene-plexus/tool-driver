@@ -18,13 +18,16 @@ async def info(request: Request) -> ToolDriverInfo:
     key = service.provider_key() if service is not None else "searxng"
     provider = PROVIDERS.get(key)
     configured = service is not None and service.configured()
+    # Remote MCP (row 59b) runs whether or not the search is set up: it
+    # needs no account settings. Not in safe mode, where nothing runs.
+    runs_mcp = getattr(request.app.state, "mcp", None) is not None
     return ToolDriverInfo(
         provider=key,
         label=provider.label if provider is not None else key,
         # Nothing is offered until it can run: the gateway reads this list,
         # and an account with no address would turn every search into a
         # failure the model has to be told about.
-        tools=[ToolName.web_search] if configured else [],
+        tools=([ToolName.web_search] if configured else []) + ([ToolName.mcp] if runs_mcp else []),
         egress=Egress.internet,
         configured=configured,
         billing=ToolBilling(provider.billing) if provider is not None else ToolBilling.per_search,

@@ -209,7 +209,7 @@ def test_no_key_is_not_set_up(tmp_path, nowhere) -> None:
     assert response.status_code == 503
     assert "add your Tavily key" in response.json()["detail"]
     assert not tavily.seen
-    assert info["configured"] is False and "web_search" not in info["tools"]
+    assert info["configured"] is False and info["tools"] == ["mcp"]
 
 
 def test_tavily_is_paid_and_never_probed() -> None:

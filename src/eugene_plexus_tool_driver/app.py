@@ -14,11 +14,13 @@ from . import __version__
 from .auth_state import load_auth_state
 from .body_limit import InferenceBodyLimit
 from .config import ConfigStore
-from .dependencies import require_authorized, require_operator
+from .dependencies import require_authorized, require_gateway, require_operator
+from .mcp_remote import RemoteMcp
 from .routes import admin as admin_routes
 from .routes import config as config_routes
 from .routes import health as health_routes
 from .routes import info as info_routes
+from .routes import mcp as mcp_routes
 from .routes import search as search_routes
 from .service import SearchService
 from .settings import Settings, load_settings
@@ -63,12 +65,22 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
         timing=getattr(app.state, "search_timing", None),
     )
     app.state.search = None if settings.safe_mode else service
+    # Remote MCP (row 59b) needs no account settings; `mcp_network` and
+    # `mcp_transports` are the test seams for its address guard.
+    seams = getattr(app.state, "mcp_network", None) or {}
+    remote = RemoteMcp(
+        resolver=seams.get("resolver"),
+        connector=seams.get("connector"),
+        transports=getattr(app.state, "mcp_transports", None),
+    )
+    app.state.mcp = None if settings.safe_mode else remote
     if not settings.safe_mode:
         service.start_probe()
     try:
         yield
     finally:
         await service.aclose()
+        await remote.aclose()
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
@@ -99,8 +111,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     authorized = [Depends(require_authorized)]
     app.include_router(info_routes.router, dependencies=authorized)
     app.include_router(search_routes.router, dependencies=authorized)
+    app.include_router(mcp_routes.router, dependencies=[Depends(require_gateway)])
     operator_only = [Depends(require_operator)]
     app.include_router(config_routes.router, dependencies=operator_only)
     app.include_router(admin_routes.router, dependencies=operator_only)
-    app.add_middleware(InferenceBodyLimit, paths={"/v1/tools/web_search"}, driver=True)
+    app.add_middleware(
+        InferenceBodyLimit,
+        paths={"/v1/tools/web_search", "/v1/tools/mcp/list_tools", "/v1/tools/mcp/call"},
+        driver=True,
+    )
     return app

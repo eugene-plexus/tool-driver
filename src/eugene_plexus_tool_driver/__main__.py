@@ -40,6 +40,11 @@ def main() -> None:
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
         force=True,
     )
+    # httpx logs every request's URL at INFO: a SearXNG search's query text,
+    # and a remote MCP server's path and query, which can carry a key (row
+    # 59b). Warnings and errors still reach the log.
+    for name in ("httpx", "httpcore"):
+        logging.getLogger(name).setLevel(max(logging.WARNING, logging.getLogger().level))
     uvicorn.run(
         create_app(settings),
         host=settings.bind_host,

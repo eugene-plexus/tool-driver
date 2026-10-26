@@ -748,7 +748,7 @@ def test_a_prepaid_key_refused_twice_is_told_too_fast_not_quota(tmp_path, nowher
 def test_an_account_with_no_address_offers_nothing_and_says_why(tmp_path, nowhere) -> None:
     with _client(tmp_path, {"provider": "searxng"}, nowhere, nowhere) as client:
         info = client.get("/v1/info").json()
-        assert info["tools"] == [] and info["configured"] is False
+        assert info["tools"] == ["mcp"] and info["configured"] is False
         assert info["egress"] == "internet"
         response = search(client)
         assert response.status_code == 503
@@ -770,7 +770,7 @@ def test_a_configured_account_offers_web_search_and_reports_healthy(searx_client
     assert info == {
         "provider": "searxng",
         "label": "SearXNG",
-        "tools": ["web_search"],
+        "tools": ["web_search", "mcp"],
         "egress": "internet",
         "configured": True,
         "billing": "free",

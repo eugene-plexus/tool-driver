@@ -84,6 +84,45 @@ def require_authorized(
     return _validate(request, creds, reads=True)
 
 
+def require_gateway(
+    request: Request,
+    creds: HTTPAuthorizationCredentials | None = Depends(_bearer_scheme),
+) -> tokens.Claims | None:
+    """The install's gateway only -- for remote MCP (row 59b).
+
+    A remote MCP call dials an address a stranger named, under the reach the
+    gateway reads from the owner's setting. A person's session, or another
+    of this machine's services, calling here directly could name its own
+    reach, so neither may: only the gateway's service token, from this
+    machine or another.
+    """
+    auth: AuthState = request.app.state.auth_state
+    if auth.auth_disabled:
+        return None
+    if creds is None or not creds.credentials:
+        raise _problem(
+            status.HTTP_401_UNAUTHORIZED,
+            "Missing token",
+            "Provide a bearer token via the Authorization: Bearer header.",
+        )
+    try:
+        claims = auth.verify(creds.credentials, classes=(tokens.TYP_SERVICE,))
+    except tokens.TokenError as e:
+        raise _problem(
+            status.HTTP_401_UNAUTHORIZED,
+            "Invalid token",
+            f"Bearer token rejected: {e}",
+        ) from e
+    if claims.sub != tokens.SUB_GATEWAY:
+        raise _problem(
+            status.HTTP_403_FORBIDDEN,
+            "Gateway only",
+            "Remote MCP is run for the install's gateway only, which applies the owner's "
+            "Remote MCP setting.",
+        )
+    return claims
+
+
 def require_operator(
     request: Request,
     creds: HTTPAuthorizationCredentials | None = Depends(_bearer_scheme),

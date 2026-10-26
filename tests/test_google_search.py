@@ -820,7 +820,7 @@ def test_info_names_the_account(tmp_path, google, lan) -> None:
         info = client.get("/v1/info").json()
     assert info["provider"] == "google"
     assert info["label"] == "Google Search (Gemini API key)"
-    assert info["billing"] == "per_search" and info["tools"] == ["web_search"]
+    assert info["billing"] == "per_search" and info["tools"] == ["web_search", "mcp"]
     assert not google.seen
 
 
