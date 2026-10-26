@@ -33,7 +33,7 @@ from ._generated.models import (
     ConfigUpdateResult,
     ConfigValueType,
 )
-from .providers import BRAVE_URL, GOOGLE_URL, PROVIDERS, known_model
+from .providers import BRAVE_URL, GOOGLE_URL, PROVIDERS, TAVILY_DEPTHS, TAVILY_URL, known_model
 
 log = logging.getLogger(__name__)
 
@@ -64,7 +64,9 @@ def _build_fields() -> list[ConfigField]:
                 "- **Brave Search** is a paid service with its own index; you give "
                 "it a key.\n"
                 "- **Google Search** asks Google through a Gemini API key, and "
-                "every search is billed past Google's free allowance.\n\n"
+                "every search is billed past Google's free allowance.\n"
+                "- **Tavily** is a paid search service made for AI models; you give "
+                "it a key, and each search costs API credits.\n\n"
                 "Whichever you pick, the words searched for go to the internet."
             ),
             category="account",
@@ -81,7 +83,7 @@ def _build_fields() -> list[ConfigField]:
                 "SearXNG: the address of your instance, such as "
                 "http://192.168.1.20:8888. Its settings must allow JSON output "
                 "(`search.formats` includes `json`); without it every search is "
-                "refused. Brave and Google: leave empty to use their own address."
+                "refused. Brave, Google and Tavily: leave empty to use their own address."
             ),
             category="account",
             valueType=ConfigValueType.url,
@@ -90,9 +92,11 @@ def _build_fields() -> list[ConfigField]:
             key="apiKey",
             label="API key",
             description=(
+                "The search service's API key, stored encrypted.\n\n"
                 "Brave: your Brave Search API subscription token, from "
                 "api-dashboard.search.brave.com. Google: a Gemini API key, from "
-                "Google AI Studio (aistudio.google.com). Stored encrypted. "
+                "Google AI Studio (aistudio.google.com). Tavily: your API key "
+                "(it starts with tvly-), from app.tavily.com.\n\n"
                 "Google's terms for Grounding with Google Search bind the key's "
                 "owner: results are shown unmodified, with Google's Search "
                 "Suggestions, to the person who asked. Workbench shows them; other "
@@ -101,7 +105,24 @@ def _build_fields() -> list[ConfigField]:
             category="account",
             valueType=ConfigValueType.secret,
             sensitive=True,
-            showWhen=_only_for("brave", "google"),
+            showWhen=_only_for("brave", "google", "tavily"),
+        ),
+        ConfigField(
+            key="searchDepth",
+            label="Search depth",
+            description=(
+                "How hard Tavily searches. Basic costs 1 API credit a search; advanced "
+                "costs 2 and gives the most relevant passages of each page."
+            ),
+            category="results",
+            valueType=ConfigValueType.enum,
+            default="basic",
+            enumValues=list(TAVILY_DEPTHS),
+            enumLabels=[
+                f"{depth.capitalize()}: {cost} credit{'' if cost == 1 else 's'} a search"
+                for depth, cost in TAVILY_DEPTHS.items()
+            ],
+            showWhen=_only_for("tavily"),
         ),
         ConfigField(
             key="searchModel",
@@ -151,6 +172,8 @@ def _build_fields() -> list[ConfigField]:
             category="results",
             valueType=ConfigValueType.string,
             pattern=r"^[A-Za-z]{2,3}([-_][A-Za-z0-9]{2,8})?$",
+            # Tavily has no language setting, so it is not offered there.
+            showWhen=_only_for("searxng", "brave", "google"),
         ),
         ConfigField(
             key="timeoutSeconds",
@@ -228,6 +251,11 @@ def _unset_facts(key: str, values: dict[str, Any]) -> dict[str, Any]:
                 "unsetMeans": f"Not set: uses Google's own address, {GOOGLE_URL}.",
                 "unsetResolvesTo": GOOGLE_URL,
             }
+        if provider == "tavily":
+            return {
+                "unsetMeans": f"Not set: uses Tavily's own address, {TAVILY_URL}.",
+                "unsetResolvesTo": TAVILY_URL,
+            }
         return {
             "unsetMeans": "Not set: a SearXNG account needs its address, so it searches nothing."
         }
@@ -247,6 +275,8 @@ def _unset_facts(key: str, values: dict[str, Any]) -> dict[str, Any]:
     if key == "apiKey":
         if provider == "google":
             return {"unsetMeans": "Not set: Google refuses a search without a Gemini API key."}
+        if provider == "tavily":
+            return {"unsetMeans": "Not set: Tavily refuses a search without a key."}
         return {"unsetMeans": "Not set: Brave refuses a search without a key."}
     if key == "searchModel":
         model = known_model(

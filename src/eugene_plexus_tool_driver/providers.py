@@ -1,4 +1,5 @@
-"""The search providers: SearXNG (free, self-hosted), Brave (keyed) and Google (a Gemini key).
+"""The search providers: SearXNG (free, self-hosted), Brave (keyed), Google (a Gemini
+key) and Tavily (keyed, row 59a).
 
 Design call #4 (`server-run-tools.md` §9). Each provider turns the one
 `WebSearchRequest` into its own wire request and its answer back into
@@ -31,6 +32,10 @@ log = logging.getLogger(__name__)
 
 BRAVE_URL = "https://api.search.brave.com"
 GOOGLE_URL = "https://generativelanguage.googleapis.com/v1beta"
+TAVILY_URL = "https://api.tavily.com"
+#: Tavily's two depths, and what each costs in its API credits (Tavily's
+#: pricing page, 2026-10): the settings page says both in one line.
+TAVILY_DEPTHS = {"basic": 1, "advanced": 2}
 
 _SAFE_SEARXNG = {"off": "0", "moderate": "1", "strict": "2"}
 
@@ -55,6 +60,8 @@ class Query:
     #: The approximate location in words ("Austin, Texas, US"), for a provider that
     #: can only be told it (Google, GS9's later slice), or None.
     place: str | None = None
+    #: `searchDepth`: Tavily's `basic` or `advanced`; unused by the others.
+    depth: str = "basic"
 
 
 @dataclass(frozen=True)
@@ -792,6 +799,144 @@ async def search_google(client: httpx.AsyncClient, account: Account, query: Quer
     )
 
 
+# --- Tavily -----------------------------------------------------------------
+
+
+def _tavily_words(response: httpx.Response, key: str | None) -> str:
+    """Tavily's own sentence for a refusal (`detail.error`, as its reference
+    documents every error), without the key should it ever echo one."""
+    try:
+        body = response.json()
+    except ValueError:
+        return _scrub(response.text[:300].strip(), key)
+    detail = body.get("detail") if isinstance(body, dict) else None
+    if isinstance(detail, dict) and isinstance(detail.get("error"), str):
+        words = detail["error"]
+    elif isinstance(detail, str):
+        words = detail
+    else:
+        words = str(body)
+    return _scrub(words[:300].strip(), key)
+
+
+def _tavily_failure(response: httpx.Response, key: str | None) -> SearchFailure:
+    """Tavily's refusal in Tavily's words: a bad key, too fast (with the wait
+    when it gives one), or a plan or pay-as-you-go limit used up (432, 433)."""
+    status = response.status_code
+    words = _tavily_words(response, key)
+    said = f": {words}" if words else ""
+    if status in (401, 403):
+        return SearchFailure(
+            502,
+            "upstream_auth_error",
+            f"Tavily refused this account's API key (HTTP {status}){said}. Check the key on "
+            "the search account's settings; a new one comes from app.tavily.com.",
+        )
+    if status == 429:
+        wait = _retry_after(response)
+        when = f"; it says to wait {_in_words(wait)}" if wait is not None else ""
+        return SearchFailure(
+            429,
+            "rate_limited",
+            f"Tavily says this key is searching too fast (HTTP 429{when}){said}",
+            retry_after=wait,
+            worth_a_retry=True,
+        )
+    if status in (432, 433):
+        # No wait inside a search ends either one, so neither is retried.
+        which = "plan's usage limit" if status == 432 else "pay-as-you-go limit"
+        return SearchFailure(
+            429,
+            "quota_exhausted",
+            f"Tavily says this key's {which} is used up (HTTP {status}){said}",
+        )
+    if status == 400:
+        return SearchFailure(
+            502,
+            "upstream_error",
+            f"Tavily refused the search's parameters (HTTP 400){said}",
+        )
+    return SearchFailure(502, "upstream_error", f"Tavily answered HTTP {status}{said}")
+
+
+def _bare_domain(value: str) -> str:
+    """A domain as Tavily's filters take it: the host, no scheme, no path."""
+    domain = value.strip()
+    if "://" in domain:
+        domain = host_of(domain)
+    return domain.split("/", 1)[0].lstrip("*.").rstrip(".").lower()
+
+
+async def search_tavily(client: httpx.AsyncClient, account: Account, query: Query) -> Found:
+    """`POST /search`, from Tavily's API reference.
+
+    Not measured live: there is no Tavily key on the development box. The
+    key rides as a bearer, never in the body, so an error that echoes the
+    body cannot carry it. Tavily applies the domain filters itself, and
+    they are applied here again afterwards, as for every provider.
+    Tavily's `answer` is kept as the provider's summary, as SearXNG's
+    answers are. Its country boost takes a country's English name, not the
+    code a request carries, so a location is named as ignored.
+    """
+    base = (account.base_url or TAVILY_URL).rstrip("/")
+    key = account.api_key or ""
+    payload: dict[str, Any] = {
+        "query": query.query,
+        "search_depth": query.depth if query.depth in TAVILY_DEPTHS else "basic",
+        "topic": "general",
+        "max_results": max(1, min(20, query.max_results)),
+        "include_answer": True,
+        "include_raw_content": False,
+        "include_images": False,
+    }
+    include = [d for d in (_bare_domain(x) for x in query.allowed or []) if d]
+    exclude = [d for d in (_bare_domain(x) for x in query.blocked or []) if d]
+    if include:
+        payload["include_domains"] = include
+    if exclude:
+        payload["exclude_domains"] = exclude
+    response = await _post(
+        client,
+        "Tavily",
+        f"{base}/search",
+        json=payload,
+        headers={"Authorization": f"Bearer {key}", "Accept": "application/json"},
+        seconds=query.timeout,
+    )
+    if response.status_code >= 400:
+        raise _tavily_failure(response, key)
+    try:
+        body = response.json()
+    except ValueError:
+        raise SearchFailure(
+            502, "upstream_error", "Tavily answered something that is not JSON"
+        ) from None
+    if not isinstance(body, dict):
+        raise SearchFailure(502, "upstream_error", "Tavily answered an odd shape")
+    hits = []
+    for result in body.get("results") or []:
+        if not isinstance(result, dict):
+            continue
+        url = result.get("url")
+        if not isinstance(url, str) or not url:
+            continue
+        published = result.get("published_date")
+        hits.append(
+            Hit(
+                url=url,
+                title=plain(result.get("title")) or url,
+                snippet=trim(plain(result.get("content")), query.context_size),
+                published_at=published if isinstance(published, str) and published else None,
+            )
+        )
+    answer = plain(body.get("answer"))
+    return Found(
+        hits=hits,
+        answer=answer or None,
+        ignored=["userLocation"] if query.located else [],
+    )
+
+
 PROVIDERS: dict[str, Provider] = {
     "searxng": Provider(
         key="searxng",
@@ -836,6 +981,21 @@ PROVIDERS: dict[str, Provider] = {
         search_interval_reason=(
             "because Google limits a Gemini key by its project's quota, not by a pace "
             "between searches."
+        ),
+    ),
+    "tavily": Provider(
+        key="tavily",
+        label="Tavily",
+        default_base_url=TAVILY_URL,
+        needs_key=True,
+        # Every search costs API credits, so nothing asks one on a timer.
+        probes=False,
+        search=search_tavily,
+        billing="per_search",
+        search_interval=0.0,
+        search_interval_reason=(
+            "because Tavily limits a key by requests a minute, and says how long to wait "
+            "when a search comes too soon."
         ),
     ),
 }

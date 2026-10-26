@@ -832,7 +832,7 @@ def test_the_settings_page_for_google() -> None:
         "Google Search (Gemini API key)"
     )
     api_key = by_key["apiKey"]
-    assert api_key.showWhen is not None and api_key.showWhen.equals == ["brave", "google"]
+    assert api_key.showWhen is not None and api_key.showWhen.equals == ["brave", "google", "tavily"]
     assert "Google AI Studio" in api_key.description
     assert (
         "Google's terms for Grounding with Google Search bind the key's owner: results are "

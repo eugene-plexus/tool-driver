@@ -134,6 +134,7 @@ class SearchService:
             place=place_words(location.city, location.region, location.country)
             if location is not None
             else None,
+            depth=str(values.get("searchDepth") or "basic"),
         )
         configured = values.get("searchIntervalSeconds")
         interval = provider.search_interval if configured is None else float(configured)

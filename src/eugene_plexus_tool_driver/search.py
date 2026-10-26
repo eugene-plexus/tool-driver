@@ -27,6 +27,11 @@ could reach it:
   `googleSearch` tool answers text plus `groundingMetadata`
   (`groundingChunks`, `groundingSupports`, `searchEntryPoint`); see
   `providers.search_google` and `docs/design/google-search-account.md`.
+* Tavily, from its API reference (no key on this box, row 59a):
+  `POST https://api.tavily.com/search` with a bearer key; `results[]` with
+  `title`, `url`, `content`, `score` and, for news, `published_date`, and
+  `answer`; errors as `{"detail": {"error": ...}}`, with 432 and 433 for a
+  plan or pay-as-you-go limit used up (`providers.search_tavily`).
 
 **Filtering is ours, always.** A provider may be told about allowed
 domains (a `site:` operator when there is exactly one), but what comes
