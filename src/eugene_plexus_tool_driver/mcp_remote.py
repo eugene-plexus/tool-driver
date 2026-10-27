@@ -23,8 +23,9 @@ The rules, each for a reason:
   echoes a token cannot send it on to a log, a metrics row or a stored
   response. An error names the server by its origin only: a path or a
   query can carry a key too.
-* **Limits**, each named when hit: 30 s for the whole call, 8 MiB for each
-  answer, 64 tools after `allowedTools`, 32 pages of tools. Answers are
+* **Limits**, each named when hit: 30 s for the whole call, 8 MiB for
+  everything the server sends in it (a list split over pages is one
+  answer), 64 tools after `allowedTools`, 32 pages of tools. Answers are
   asked for uncompressed and read raw, so the 8 MiB counts what arrives.
 """
 
@@ -228,6 +229,8 @@ class _Session:
         self.session_id: str | None = None
         self.version: str | None = None
         self._next_id = 0
+        #: Bytes read from the server in this call, every request's answer.
+        self.read = 0
 
     def _fail(self, status: int, code: str, words: str) -> McpFailure:
         return McpFailure(
@@ -386,15 +389,13 @@ class _Session:
         )
 
     async def _chunks(self, response: httpx.Response) -> AsyncIterator[bytes]:
-        read = 0
+        """The answer's bytes, counted against the whole call's limit: a list
+        split over pages is one answer, so splitting it cannot hold more."""
         async for chunk in response.aiter_raw():
-            read += len(chunk)
-            if read > LIMIT_BYTES:
-                raise self._fail(
-                    502,
-                    "too_large",
-                    f"sent an answer over the {LIMIT_BYTES // (1024 * 1024)} MiB limit",
-                )
+            self.read += len(chunk)
+            if self.read > LIMIT_BYTES:
+                size = f"{LIMIT_BYTES / (1024 * 1024):g} MiB"
+                raise self._fail(502, "too_large", f"sent an answer over the {size} limit")
             yield chunk
 
     async def _body(self, response: httpx.Response) -> bytes:

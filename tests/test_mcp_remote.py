@@ -504,6 +504,19 @@ def test_an_answer_over_the_size_limit_is_named(mcp, fixture, monkeypatch) -> No
     assert "MiB limit" in response.json()["detail"]
 
 
+def test_the_size_limit_covers_every_page_of_a_listing(mcp, fixture, monkeypatch) -> None:
+    """Each page under the limit, together over it: a server cannot make this
+    process hold 32 pages of 8 MiB by splitting its list."""
+    monkeypatch.setattr(mcp_remote, "LIMIT_BYTES", 6000)
+    fixture.tools = [tool(f"t{i}", "x" * 1500) for i in range(6)]
+    fixture.page_size = 1
+    response = list_tools(mcp)
+    assert response.status_code == 502, response.text
+    assert response.json()["code"] == "too_large"
+    pages = [m for m in fixture.methods() if m == "tools/list"]
+    assert 1 < len(pages) < 6, pages
+
+
 def test_a_server_slower_than_the_limit_is_named(mcp, fixture, monkeypatch) -> None:
     monkeypatch.setattr(mcp_remote, "LIMIT_SECONDS", 0.3)
     fixture.slow = 1.0

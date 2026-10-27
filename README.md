@@ -50,7 +50,7 @@ machine's loopback, link-local and cloud metadata addresses are never
 reached. Every address a name resolves to is checked, and the connection
 goes to the address that was checked. The caller's headers go to that one
 server for that one call, and are never logged or kept. Limits: 30 s a
-call, 8 MiB an answer, 64 tools.
+call, 8 MiB in all that a server sends for one call, 64 tools.
 
 The contract is [`openapi/tool-driver.yaml`](https://github.com/eugene-plexus/specs/blob/main/openapi/tool-driver.yaml)
 in `specs`; the design is
