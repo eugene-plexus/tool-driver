@@ -236,3 +236,13 @@ def test_the_settings_page_offers_tavily_and_its_depth() -> None:
     for name in ("language", "safeSearch"):
         shown = fields[name].showWhen
         assert shown is not None and "tavily" not in shown.equals, name
+
+
+def test_a_key_echoed_late_in_an_error_is_scrubbed_before_it_is_cut(tmp_path, nowhere) -> None:
+    """Second-model review: the words were cut at 300 characters and then
+    scrubbed, so a key that started near the cut left its first characters."""
+    tavily = Upstream(lambda request: tavily_error(400, "x" * 280 + KEY))
+    with _client(tmp_path, config(), nowhere, tavily) as client:
+        response = search(client)
+    assert response.status_code == 502, response.text
+    assert KEY[:8] not in response.text, response.json()["detail"][-80:]

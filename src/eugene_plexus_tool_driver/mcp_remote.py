@@ -39,8 +39,10 @@ import re
 import time
 from collections.abc import AsyncIterator, Mapping
 from dataclasses import dataclass, field
+from http.cookiejar import Cookie, CookieJar, DefaultCookiePolicy
 from typing import Any
 from urllib.parse import urljoin
+from urllib.request import Request
 
 import httpcore
 import httpx
@@ -49,6 +51,17 @@ from . import __version__
 from ._http import internal_client, ssl_context
 from .egress_guard import ALLOWED, GuardedBackend, Resolver, refused_reason
 from .search import SearchFailure
+
+
+class _NoCookies(DefaultCookiePolicy):
+    """Keeps no cookie and sends none: every caller shares one client."""
+
+    def set_ok(self, cookie: Cookie, request: Request) -> bool:
+        return False
+
+    def return_ok(self, cookie: Cookie, request: Request) -> bool:
+        return False
+
 
 log = logging.getLogger(__name__)
 
@@ -91,6 +104,13 @@ FRAMING = frozenset(
     }
 )
 _TOKEN = re.compile(r"^[!#$%&'*+\-.^_`|~0-9A-Za-z]{1,128}$")
+#: A header that carries a credential: its value is scrubbed whatever its length.
+_CREDENTIAL = re.compile(r"auth|cookie|key|token|secret|passw|session|credential", re.IGNORECASE)
+#: How deep an answer's JSON may nest: a JSON-RPC envelope and any tool schema
+#: fit in far fewer; deeper is refused by name, never a decoder's RecursionError.
+LIMIT_DEPTH = 64
+#: The longest an error's words are, cut only after the caller's values are scrubbed.
+LIMIT_WORDS = 600
 _TOOL_NAME = re.compile(r"^[^\x00-\x1f\x7f]{1,128}$")
 
 
@@ -182,10 +202,14 @@ class Scrubber:
 
     @classmethod
     def of(cls, headers: Mapping[str, str]) -> Scrubber:
+        """Every header value of eight characters or more, and every value of a
+        credential header (`Authorization`, `Cookie`, anything named for a key,
+        token, secret or password) whatever its length (second-model review)."""
         found: set[str] = set()
-        for value in headers.values():
+        for name, value in headers.items():
+            least = 1 if _CREDENTIAL.search(name) else SCRUB_MIN
             parts = [value, *value.split(None, 1)[1:]]  # "Bearer xyz" -> also "xyz"
-            found.update(p.strip() for p in parts if len(p.strip()) >= SCRUB_MIN)
+            found.update(p.strip() for p in parts if len(p.strip()) >= least)
         return cls(sorted(found, key=len, reverse=True))
 
     def text(self, value: str) -> str:
@@ -233,9 +257,29 @@ class _Session:
         self.read = 0
 
     def _fail(self, status: int, code: str, words: str) -> McpFailure:
-        return McpFailure(
-            status, code, self.scrub.text(f"The MCP server at {self.where.origin} {words}")
-        )
+        """A failure in words with the caller's values scrubbed out first, and only
+        then cut short: cut first, a credential's first characters could stay."""
+        said = self.scrub.text(f"The MCP server at {self.where.origin} {words}")
+        if len(said) > LIMIT_WORDS:
+            said = said[: LIMIT_WORDS - 1] + "…"
+        return McpFailure(status, code, said)
+
+    def parsed(self, text: str | bytes) -> Any:
+        """JSON from the server, refused by name when it nests deeper than
+        `LIMIT_DEPTH` (a decoder's RecursionError was a bare 500). Raises
+        `ValueError` for what is not JSON at all."""
+        try:
+            value = json.loads(text)
+        except RecursionError:
+            value = None
+            deep = True
+        else:
+            deep = _depth(value) > LIMIT_DEPTH
+        if deep:
+            raise self._fail(
+                502, "too_deep", f"answered JSON nested deeper than {LIMIT_DEPTH} levels"
+            )
+        return value
 
     def _request_headers(self) -> dict[str, str]:
         headers = {
@@ -276,7 +320,7 @@ class _Session:
             raise self._fail(502, "upstream_error", f"sent no answer to {method}")
         error = message.get("error")
         if isinstance(error, dict):
-            words = str(error.get("message") or "no message")[:300]
+            words = str(error.get("message") or "no message")
             raise self._fail(
                 502, "server_error", f"answered {method} with error {error.get('code')}: {words}"
             )
@@ -293,8 +337,14 @@ class _Session:
         if not self.session_id:
             return
         with contextlib.suppress(Exception):
-            async with asyncio.timeout(END_SECONDS):
-                await self.client.delete(self.url, headers=self._request_headers())
+            async with (
+                asyncio.timeout(END_SECONDS),
+                self.client.stream("DELETE", self.url, headers=self._request_headers()),
+            ):
+                # Never read: nothing in the answer is needed, and reading it
+                # would decode a compressed body outside the byte limit
+                # (second-model review).
+                pass
 
     async def _post(self, payload: dict[str, Any], ident: int | None) -> _Answer:
         url = self.url
@@ -375,7 +425,7 @@ class _Session:
         if kind == "application/json":
             body = await self._body(response)
             try:
-                parsed = json.loads(body)
+                parsed = self.parsed(body)
             except ValueError:
                 raise self._fail(
                     502, "upstream_error", "answered JSON that does not parse"
@@ -422,16 +472,44 @@ class _Session:
                 del pending[: cut + 1]
                 scan = 0
                 if line == "":
-                    found = _event(data, ident)
+                    found = self._event(data, ident)
                     data = []
                     if found is not None:
                         return found
                 elif line.startswith("data:"):
                     data.append(line[5:].removeprefix(" "))
-        found = _event(data, ident)
+        found = self._event(data, ident)
         if found is not None:
             return found
         raise self._fail(502, "upstream_error", "ended its event stream without answering")
+
+    def _event(self, data: list[str], ident: int) -> dict[str, Any] | None:
+        if not data:
+            return None
+        try:
+            parsed = self.parsed("\n".join(data))
+        except ValueError:
+            return None
+        return _matching(parsed, ident)
+
+
+def _depth(value: Any) -> int:
+    """How deep `value` nests, counted without recursion."""
+    deepest = 0
+    stack: list[tuple[Any, int]] = [(value, 1)]
+    while stack:
+        item, level = stack.pop()
+        if isinstance(item, dict):
+            children: Any = item.values()
+        elif isinstance(item, list):
+            children = item
+        else:
+            continue
+        deepest = max(deepest, level)
+        if deepest > LIMIT_DEPTH:
+            return deepest
+        stack.extend((child, level + 1) for child in children)
+    return deepest
 
 
 def _matching(parsed: Any, ident: int) -> dict[str, Any] | None:
@@ -445,16 +523,6 @@ def _matching(parsed: Any, ident: int) -> dict[str, Any] | None:
         ):
             return message
     return None
-
-
-def _event(data: list[str], ident: int) -> dict[str, Any] | None:
-    if not data:
-        return None
-    try:
-        parsed = json.loads("\n".join(data))
-    except ValueError:
-        return None
-    return _matching(parsed, ident)
 
 
 # --------------------------------------------------------------------------- #
@@ -549,6 +617,10 @@ class RemoteMcp:
                 transport=transport,
                 follow_redirects=False,
                 timeout=httpx.Timeout(LIMIT_SECONDS, connect=10.0),
+                # A jar that keeps nothing: the client is shared by every
+                # caller, and a cookie one caller's server set would otherwise
+                # ride on another caller's call to that domain (review).
+                cookies=CookieJar(policy=_NoCookies()),
             )
             self._clients[key] = client
         return client
@@ -605,6 +677,16 @@ class RemoteMcp:
                     name = entry.get("name")
                     if not isinstance(name, str) or not _TOOL_NAME.match(name) or name in names:
                         continue
+                    if scrub.text(name) != name:
+                        # A name reaches the model, the listing and a stored
+                        # response as it is: one that carries a credential is
+                        # refused, and never named (second-model review).
+                        raise session._fail(
+                            502,
+                            "credential_in_tool_name",
+                            "named a tool with one of the request's credentials; Eugene does "
+                            "not offer that server's tools",
+                        )
                     if wanted is not None and name not in wanted:
                         continue
                     names.add(name)

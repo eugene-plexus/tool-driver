@@ -563,3 +563,150 @@ def test_only_the_gateway_may_call(tmp_path, install: FakeInstall) -> None:
 
 def test_httpx_still_keeps_its_pool_where_the_guard_replaces_it() -> None:
     assert isinstance(httpx.AsyncHTTPTransport()._pool, httpcore.AsyncConnectionPool)
+
+
+# --------------------------------------------------------------------------- #
+# The second-model review (2026-10-27)
+# --------------------------------------------------------------------------- #
+
+
+def test_cookies_never_pass_between_calls_or_requests(tmp_path, fixture) -> None:
+    """Blocker 3: a cookie one caller's server set never rides on another's call.
+
+    The server sets a cookie for the whole domain; a later call to another host
+    of that domain, by another caller, must not carry it -- nor may the next
+    request of the same session."""
+
+    def sets_a_cookie(request: Any, message: dict[str, Any]) -> Response | None:
+        if message.get("method") == "initialize":
+            body = {
+                "jsonrpc": "2.0",
+                "id": message["id"],
+                "result": {"protocolVersion": "2025-06-18", "capabilities": {}},
+            }
+            return JSONResponse(
+                body,
+                headers={
+                    "Mcp-Session-Id": "session-1",
+                    "Set-Cookie": f"auth=A-{TOKEN}; Domain=example.com; Path=/",
+                },
+            )
+        return None
+
+    fixture.hook = sets_a_cookie
+    with make_client(tmp_path, fixture=fixture) as client:
+        assert list_tools(client, headers={"Authorization": "Bearer caller-A"}).status_code == 200
+        fixture.hook = None
+        second = list_tools(
+            client, "https://b.example.com/mcp", headers={"Authorization": "Bearer caller-B"}
+        )
+        assert second.status_code == 200, second.text
+    sent = [headers.get("cookie") for _, _, headers, _ in fixture.seen]
+    assert sent == [None] * len(sent), sent
+
+
+class _Unread(httpx.AsyncByteStream):
+    """An answer body that says whether anyone read it."""
+
+    def __init__(self, body: bytes) -> None:
+        self.body = body
+        self.read = False
+
+    async def __aiter__(self):  # type: ignore[override]
+        self.read = True
+        yield self.body
+
+
+def test_ending_a_session_never_reads_its_answer(tmp_path, fixture) -> None:
+    """Blocker 5: the DELETE that ends a session is not read, so a compressed
+    answer to it cannot expand outside the byte limit."""
+    import gzip
+
+    inner = httpx.ASGITransport(app=fixture.app)
+    bomb = _Unread(gzip.compress(b"\0" * (9 * 1024 * 1024)))
+    deletes: list[httpx.Request] = []
+
+    class Spy(httpx.AsyncBaseTransport):
+        async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+            if request.method == "DELETE":
+                deletes.append(request)
+                return httpx.Response(200, headers={"content-encoding": "gzip"}, stream=bomb)
+            return await inner.handle_async_request(request)
+
+    app = create_app(Settings(config_file=tmp_path / "td.yaml"))
+    app.state.mcp_network = {"connector": NeverConnect()}
+    app.state.mcp_transports = {("internet", "https"): Spy()}
+    with TestClient(app) as client:
+        response = list_tools(client)
+    assert response.status_code == 200, response.text
+    assert len(deletes) == 1, "the session was ended"
+    assert deletes[0].headers["accept-encoding"] == "identity"
+    assert bomb.read is False, "the answer to the DELETE was read"
+
+
+def test_a_tool_named_with_the_callers_credential_is_refused(mcp, fixture) -> None:
+    fixture.tools = [tool(f"steal_{TOKEN}")]
+    response = list_tools(mcp, headers={"Authorization": f"Bearer {TOKEN}"})
+    assert response.status_code == 502, response.text
+    assert response.json()["code"] == "credential_in_tool_name"
+    assert TOKEN not in response.text
+
+
+def test_a_short_credential_is_scrubbed_too(mcp, fixture) -> None:
+    short = "k3y9z"
+
+    def echo_error(request: Any, message: dict[str, Any]) -> Response | None:
+        if message.get("method") == "tools/list":
+            return JSONResponse(
+                {
+                    "jsonrpc": "2.0",
+                    "id": message["id"],
+                    "error": {"code": -32000, "message": f"bad key {short}"},
+                }
+            )
+        return None
+
+    fixture.hook = echo_error
+    response = list_tools(mcp, headers={"Authorization": f"Bearer {short}"})
+    assert response.status_code == 502
+    assert short not in response.text and "[redacted]" in response.json()["detail"]
+
+
+def test_scrubbing_comes_before_shortening(mcp, fixture) -> None:
+    def long_error(request: Any, message: dict[str, Any]) -> Response | None:
+        if message.get("method") == "tools/list":
+            return JSONResponse(
+                {
+                    "jsonrpc": "2.0",
+                    "id": message["id"],
+                    "error": {"code": -32000, "message": "x" * 290 + TOKEN},
+                }
+            )
+        return None
+
+    fixture.hook = long_error
+    response = list_tools(mcp, headers={"X-Key": TOKEN})
+    assert response.status_code == 502
+    assert TOKEN[:8] not in response.text, response.json()["detail"][-60:]
+
+
+@pytest.mark.parametrize("depth", [100, 20000])
+def test_json_nested_too_deep_is_named(mcp, fixture, depth: int) -> None:
+    """Should-fix 5b: deep nesting is refused by name, never a bare 500."""
+
+    def deep(request: Any, message: dict[str, Any]) -> Response | None:
+        if message.get("method") == "tools/list":
+            nested = "[" * depth + "]" * depth
+            head = '{"jsonrpc":"2.0","id":' + str(message["id"])
+            body = (
+                head + ',"result":{"tools":[{"name":"x","inputSchema":'
+                '{"type":"object","default":' + nested + "}}]}}"
+            )
+            return Response(body, media_type="application/json")
+        return None
+
+    fixture.hook = deep
+    response = list_tools(mcp)
+    assert response.status_code == 502, response.text
+    assert response.json()["code"] == "too_deep"
+    assert "nested deeper than" in response.json()["detail"]

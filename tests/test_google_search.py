@@ -912,3 +912,14 @@ def test_overlapping_segments_keep_the_longer_text_once(tmp_path, google, lan) -
     )
     response = run(tmp_path, google, lan, {"searchModel": "gemini-3.5-flash-lite"})
     assert response.json()["results"][0]["snippet"] == "The Pi 5 costs $80. Resellers stock it."
+
+
+def test_a_key_echoed_late_in_googles_error_is_scrubbed_before_it_is_cut(
+    tmp_path, google, lan
+) -> None:
+    """The same order as Tavily's (second-model review): scrub, then cut."""
+    google.generate = lambda r: error("INVALID_ARGUMENT", "x" * 290 + KEY, 400)
+    with google_client(tmp_path, google, lan, searchModel="m") as client:
+        response = search(client)
+    assert response.status_code == 502, response.text
+    assert KEY[:8] not in response.text, response.json()["detail"][-80:]

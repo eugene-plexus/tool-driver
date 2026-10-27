@@ -529,10 +529,10 @@ def _google_error(response: httpx.Response) -> tuple[str, float | None]:
     try:
         body = response.json()
     except ValueError:
-        return response.text[:300], None
+        return response.text, None
     error = body.get("error") if isinstance(body, dict) else None
     if not isinstance(error, dict):
-        return str(body)[:300], None
+        return str(body), None
     delay: float | None = None
     for detail in error.get("details") or []:
         if isinstance(detail, dict) and str(detail.get("@type", "")).endswith("RetryInfo"):
@@ -541,14 +541,15 @@ def _google_error(response: httpx.Response) -> tuple[str, float | None]:
                 delay = max(0.0, float(raw))
             except ValueError:
                 delay = None
-    return str(error.get("message") or error.get("status") or "")[:300], delay
+    # Whole: the caller scrubs the key out and only then cuts it short.
+    return str(error.get("message") or error.get("status") or ""), delay
 
 
 def _google_failure(response: httpx.Response, key: str | None, model: str | None) -> SearchFailure:
     """Google's refusal as the sentence a person and a model are handed."""
     status = response.status_code
     message, delay = _google_error(response)
-    message = _scrub(message, key)
+    message = _scrub(message, key)[:300]
     if "location is not supported" in message.lower():
         return SearchFailure(
             502,
@@ -808,7 +809,7 @@ def _tavily_words(response: httpx.Response, key: str | None) -> str:
     try:
         body = response.json()
     except ValueError:
-        return _scrub(response.text[:300].strip(), key)
+        return _scrub(response.text, key)[:300].strip()
     detail = body.get("detail") if isinstance(body, dict) else None
     if isinstance(detail, dict) and isinstance(detail.get("error"), str):
         words = detail["error"]
@@ -816,7 +817,9 @@ def _tavily_words(response: httpx.Response, key: str | None) -> str:
         words = detail
     else:
         words = str(body)
-    return _scrub(words[:300].strip(), key)
+    # Scrubbed whole, then cut: cut first, a key that starts before the cut
+    # would leave its first characters behind (second-model review).
+    return _scrub(words, key)[:300].strip()
 
 
 def _tavily_failure(response: httpx.Response, key: str | None) -> SearchFailure:
